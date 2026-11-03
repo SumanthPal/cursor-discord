@@ -69,18 +69,21 @@ class CursorAgentService:
         *,
         prompt: str,
         repo_url: str,
-        branch: str,
+        branch: str | None = None,
         model: str | None = None,
         auto_create_pr: bool = True,
         metadata: dict[str, str] | None = None,
         on_status: StatusCallback | None = None,
     ) -> RunOutcome:
+        # Omit starting_ref when unset so Cursor resolves the repo default branch
+        # (many repos still use master / develop — hardcoding main fails).
+        starting = (branch or "").strip() or None
         agent = await self.client.create_agent(
             model=model or self.default_model,
             api_key=self.api_key,
             cloud=CloudAgentOptions(
                 repos=[
-                    CloudRepository(url=repo_url, starting_ref=branch or "main")
+                    CloudRepository(url=repo_url, starting_ref=starting)
                 ],
                 auto_create_pr=auto_create_pr,
                 skip_reviewer_request=True,
