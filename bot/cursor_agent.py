@@ -14,6 +14,7 @@ from cursor_sdk import (
     CloudRepository,
     CursorAgentError,
     RunResult,
+    SdkArtifact,
     UserMessage,
 )
 
@@ -145,6 +146,32 @@ class CursorAgentService:
                 urls.append(str(url).rstrip("/"))
         # Stable, de-duped
         return sorted(set(urls))
+
+    async def list_artifacts(self, agent_id: str) -> list[SdkArtifact]:
+        agent = await self.client.resume_agent(
+            agent_id,
+            {
+                "api_key": self.api_key,
+                "model": self.default_model,
+            },
+        )
+        try:
+            return await agent.list_artifacts()
+        finally:
+            await agent.close()
+
+    async def download_artifact(self, agent_id: str, path: str) -> bytes:
+        agent = await self.client.resume_agent(
+            agent_id,
+            {
+                "api_key": self.api_key,
+                "model": self.default_model,
+            },
+        )
+        try:
+            return await agent.download_artifact(path)
+        finally:
+            await agent.close()
 
     async def status(self, agent_id: str) -> dict[str, Any]:
         info = await self.client.get_agent(agent_id, api_key=self.api_key)

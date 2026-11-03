@@ -12,6 +12,7 @@ from bot.agent_ref import (
     find_agent_ref_in_channel,
     is_agent_id,
 )
+from bot.cloud_artifacts import deliver_new_cloud_artifacts
 from bot.multimodal import AgentPrompt, agent_prompt_from_message
 from bot.projects import Project, set_channel_project_topic
 from bot.repo_refs import decode_repo_ref, encode_repo_ref
@@ -26,9 +27,10 @@ logger = logging.getLogger(__name__)
 DISCORD_CONTENT_MAX = 2000
 
 HELP_TEXT = """**Clippy**
-• `@Clippy …` or `/ask` to start (attach images on the same message)
+• `@Clippy …` or `/ask` to start (PNG/JPEG/GIF/WebP on the same message)
 • First repo pick pins the channel (`cursor-repo:…` in topic)
 • Reply in the thread to steer · Cancel / Open PR on the card
+• Demo screenshots/videos from the agent land in the thread when a run finishes (`/artifacts` to retry)
 """
 
 
@@ -100,6 +102,70 @@ class AgentCog(commands.Cog):
     @app_commands.command(name="help", description="How to use Clippy")
     async def help_cmd(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(HELP_TEXT, ephemeral=True)
+
+    @app_commands.command(
+        name="artifacts",
+        description="Post new cloud agent demo artifacts into this thread",
+    )
+    @app_commands.describe(
+        agent_id="Optional bc-… id; defaults to the agent for this thread",
+    )
+    async def artifacts_cmd(
+        self,
+        interaction: discord.Interaction,
+        agent_id: str | None = None,
+    ) -> None:
+        denied = self.bot.policy.authorize(
+            user=interaction.user, guild=interaction.guild
+        )
+        if denied:
+            await interaction.response.send_message(denied, ephemeral=True)
+            return
+
+        channel = interaction.channel
+        if not isinstance(channel, discord.Thread):
+            await interaction.response.send_message(
+                "Run `/artifacts` inside an agent thread.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        resolved_id = agent_id.strip() if agent_id else None
+        if not resolved_id:
+            assert self.bot.user is not None
+            ref = await find_agent_ref_in_channel(
+                channel, bot_user_id=self.bot.user.id
+            )
+            if not ref:
+                await interaction.followup.send(
+                    "No agent in this thread. Pass `agent_id` or start with `/ask`.",
+                    ephemeral=True,
+                )
+                return
+            resolved_id = ref.agent_id
+
+        if not is_agent_id(resolved_id):
+            await interaction.followup.send(
+                "agent_id must look like `bc-…`", ephemeral=True
+            )
+            return
+
+        posted = self.bot.posted_artifacts.setdefault(resolved_id, set())
+        count = await deliver_new_cloud_artifacts(
+            thread=channel,
+            cursor=self.bot.cursor,
+            agent_id=resolved_id,
+            posted=posted,
+        )
+        if count:
+            await interaction.followup.send(
+                f"Posted {count} artifact(s) to the thread.", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "No new artifacts to post (already shared or none on the agent yet).",
+                ephemeral=True,
+            )
 
     @app_commands.command(name="ask", description="Start a Cursor cloud agent")
     @app_commands.describe(
@@ -755,6 +821,23 @@ class AgentCog(commands.Cog):
         if outcome.pr_url:
             bits.append(outcome.pr_url)
         await thread.send(" ".join(bits))
+        await self._deliver_artifacts(thread, outcome.agent_id)
+
+    async def _deliver_artifacts(
+        self, thread: discord.abc.Messageable, agent_id: str
+    ) -> None:
+        if not is_agent_id(agent_id):
+            return
+        posted = self.bot.posted_artifacts.setdefault(agent_id, set())
+        try:
+            await deliver_new_cloud_artifacts(
+                thread=thread,
+                cursor=self.bot.cursor,
+                agent_id=agent_id,
+                posted=posted,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("artifact delivery failed for %s", agent_id)
 
     async def _follow_up(
         self,
@@ -881,6 +964,10 @@ class AgentCog(commands.Cog):
             await status_message.edit(embed=embed, view=view)
         except discord.HTTPException:
             pass
+
+        channel = status_message.channel
+        if isinstance(channel, discord.Thread):
+            await self._deliver_artifacts(channel, outcome.agent_id)
 
 
 def _strip_mention(content: str, bot_user: discord.ClientUser) -> str:

@@ -12,9 +12,12 @@ from cursor_sdk import SDKImage, UserMessage
 logger = logging.getLogger(__name__)
 
 IMAGE_MIME_PREFIX = "image/"
-# Discord attachment limit is often 8–25 MiB; keep a conservative cap for agent payloads.
-MAX_IMAGE_BYTES = 8 * 1024 * 1024
-MAX_IMAGES = 10
+# Cloud Agents API: up to 5 images, 15 MiB each (PNG/JPEG/GIF/WebP).
+MAX_IMAGE_BYTES = 15 * 1024 * 1024
+MAX_IMAGES = 5
+PROMPT_IMAGE_MIMES = frozenset(
+    {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"}
+)
 
 _EMPTY_TEXT_PLACEHOLDER = "(See attached image(s).)"
 
@@ -53,12 +56,27 @@ class AgentPrompt:
         return bool(self.text.strip()) or bool(self.images)
 
 
-def is_image_attachment(attachment: discord.Attachment) -> bool:
-    ctype = (attachment.content_type or "").lower()
-    if ctype.startswith(IMAGE_MIME_PREFIX):
-        return True
+def _attachment_mime(attachment: discord.Attachment) -> str | None:
+    ctype = (attachment.content_type or "").split(";", 1)[0].strip().lower()
+    if ctype:
+        return ctype
     guessed, _ = mimetypes.guess_type(attachment.filename or "")
-    return bool(guessed and guessed.startswith(IMAGE_MIME_PREFIX))
+    return guessed.lower() if guessed else None
+
+
+def is_image_attachment(attachment: discord.Attachment) -> bool:
+    mime = _attachment_mime(attachment)
+    return bool(mime and mime.startswith(IMAGE_MIME_PREFIX))
+
+
+def is_prompt_image_attachment(attachment: discord.Attachment) -> bool:
+    """Raster formats accepted by the Cloud Agents API prompt.images field."""
+    mime = _attachment_mime(attachment)
+    if not mime or mime == "image/svg+xml":
+        return False
+    if mime == "image/jpg":
+        return True
+    return mime in PROMPT_IMAGE_MIMES
 
 
 def non_image_attachment_line(attachment: discord.Attachment) -> str:
@@ -90,6 +108,12 @@ async def agent_prompt_from_message(
                 )
                 break
             if is_image_attachment(attachment):
+                if not is_prompt_image_attachment(attachment):
+                    notes.append(
+                        f"- `{attachment.filename}` is not a supported prompt image "
+                        "(use PNG, JPEG, GIF, or WebP — not SVG)."
+                    )
+                    continue
                 try:
                     images.append(await _download_image(attachment, session))
                 except Exception as exc:  # noqa: BLE001
@@ -130,8 +154,10 @@ async def _download_image(
     ctype = attachment.content_type or mimetypes.guess_type(attachment.filename or "")[
         0
     ]
-    if not ctype or not ctype.startswith(IMAGE_MIME_PREFIX):
+    if not ctype or ctype not in PROMPT_IMAGE_MIMES:
         ctype = "image/png"
+    if ctype == "image/jpg":
+        ctype = "image/jpeg"
 
     async with session.get(attachment.url) as resp:
         resp.raise_for_status()
