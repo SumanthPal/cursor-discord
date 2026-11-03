@@ -1,0 +1,12 @@
+# Copy to projects.yaml for local mounts, or convert to PROJECTS_JSON for Cloud Run.
+# Slash `repo:` always works even with an empty registry.
+
+default: instinct
+
+projects:
+  instinct:
+    repo: https://github.com/you/Instinct-2.0
+    branch: main
+  website:
+    repo: https://github.com/you/website
+    branch: main
