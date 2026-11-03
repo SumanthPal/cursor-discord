@@ -100,7 +100,6 @@ class AgentCog(commands.Cog):
             )
             return
 
-        await interaction.response.defer(ephemeral=False, thinking=True)
         await self._launch_new_agent(
             interaction=interaction,
             prompt=prompt,
@@ -426,16 +425,19 @@ class AgentCog(commands.Cog):
         prompt: str,
         branch: str | None,
     ) -> None:
+        # Defer before list_repos — Cursor API can exceed Discord's 3s window.
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         try:
             urls = await self.bot.cursor.list_repos()
         except Exception as exc:  # noqa: BLE001
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Could not load Cursor repos: {exc}",
                 ephemeral=True,
             )
             return
         if not urls:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "No Cursor-connected repos found. Link GitHub in the Cursor "
                 "dashboard for this API key, or pass `repo:` explicitly.",
                 ephemeral=True,
@@ -460,7 +462,7 @@ class AgentCog(commands.Cog):
             on_picked=on_picked,
             owner_id=interaction.user.id,
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Pick a repo for: **{_truncate_prompt(prompt)}**",
             view=view,
             ephemeral=True,
@@ -552,13 +554,13 @@ class AgentCog(commands.Cog):
             repo=project.repo,
             status="starting",
         )
-        # Must follow up (or edit) a deferred interaction — otherwise Discord
-        # leaves a stuck/failed "thinking" indicator beside the real card.
-        if interaction.response.is_done():
-            placeholder = await interaction.followup.send(embed=embed)
-        else:
-            await interaction.response.defer(ephemeral=False, thinking=True)
-            placeholder = await interaction.followup.send(embed=embed)
+        # Acknowledge the interaction (clears Discord's 3s / thinking UI), but
+        # post the status card via channel.send so later edits use the bot
+        # token — interaction webhook tokens expire after ~15 minutes.
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        placeholder = await channel.send(embed=embed)
+        await _clear_deferred_thinking(interaction, placeholder)
         thread = await self._ensure_thread(channel, placeholder, prompt)
         await thread.send(
             "Thread linked to this run. **Reply here** after it finishes to continue."
@@ -858,6 +860,24 @@ def _truncate_prompt(prompt: str) -> str:
     if len(cleaned) > 120:
         return cleaned[:117] + "…"
     return cleaned
+
+
+async def _clear_deferred_thinking(
+    interaction: discord.Interaction, placeholder: discord.Message
+) -> None:
+    """Finish the deferred interaction without relying on webhook message edits."""
+    try:
+        await interaction.delete_original_response()
+        return
+    except (discord.HTTPException, discord.NotFound):
+        pass
+    try:
+        await interaction.followup.send(
+            f"Started → {placeholder.jump_url}",
+            ephemeral=True,
+        )
+    except discord.HTTPException:
+        logger.debug("could not ack deferred interaction", exc_info=True)
 
 
 async def setup(bot: CursorDiscordBot) -> None:
