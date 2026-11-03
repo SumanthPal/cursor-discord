@@ -12,6 +12,7 @@ from bot.agent_ref import (
     find_agent_ref_in_channel,
     is_agent_id,
 )
+from bot.multimodal import AgentPrompt, agent_prompt_from_message
 from bot.projects import Project, set_channel_project_topic
 from bot.repo_refs import decode_repo_ref, encode_repo_ref
 from bot.ui import RepoPickerView, controls_for, short_repo_label
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 DISCORD_CONTENT_MAX = 2000
 
 HELP_TEXT = """**Clippy**
-• `@Clippy …` or `/ask` to start
+• `@Clippy …` or `/ask` to start (attach images on the same message)
 • First repo pick pins the channel (`cursor-repo:…` in topic)
 • Reply in the thread to steer · Cancel / Open PR on the card
 """
@@ -133,14 +134,14 @@ class AgentCog(commands.Cog):
         if resolved is None:
             await self._offer_repo_picker(
                 interaction=interaction,
-                prompt=prompt,
+                agent_prompt=AgentPrompt.from_text(prompt),
                 branch=None,
             )
             return
 
         await self._launch_new_agent(
             interaction=interaction,
-            prompt=prompt,
+            agent_prompt=AgentPrompt.from_text(prompt),
             project=resolved,
             announce_channel=interaction.channel,
         )
@@ -239,7 +240,7 @@ class AgentCog(commands.Cog):
         await self._follow_up(
             interaction=interaction,
             agent_id=agent_id.strip(),
-            prompt=prompt,
+            agent_prompt=AgentPrompt.from_text(prompt),
             repo="(existing agent)",
             project_alias=None,
         )
@@ -416,19 +417,26 @@ class AgentCog(commands.Cog):
                 message.channel, bot_user_id=self.bot.user.id
             )
             if ref and not _is_bot_mention_only(message, self.bot.user):
-                # Ignore slash-induced empties; require non-empty text
-                prompt = message.content.strip()
-                if prompt and not message.content.startswith("/"):
+                prompt_text = message.content.strip()
+                if (
+                    (prompt_text or message.attachments)
+                    and not message.content.startswith("/")
+                ):
                     denied = self.bot.policy.authorize(
                         user=message.author, guild=message.guild
                     )
                     if denied:
                         await message.reply(denied, mention_author=False)
                         return
+                    agent_prompt = await agent_prompt_from_message(
+                        message, text=prompt_text
+                    )
+                    if not agent_prompt.has_content:
+                        return
                     await self._follow_up_message(
                         message=message,
                         agent_id=ref.agent_id,
-                        prompt=prompt,
+                        agent_prompt=agent_prompt,
                         repo=ref.repo or "(existing agent)",
                         project_alias=ref.project,
                     )
@@ -436,10 +444,11 @@ class AgentCog(commands.Cog):
 
         if self.bot.user not in message.mentions:
             return
-        prompt = _strip_mention(message.content, self.bot.user)
-        if not prompt:
+        prompt_text = _strip_mention(message.content, self.bot.user)
+        agent_prompt = await agent_prompt_from_message(message, text=prompt_text)
+        if not agent_prompt.has_content:
             await message.reply(
-                "`@Clippy <what to do>` or `/ask`",
+                "`@Clippy <what to do>` (images can be attached) or `/ask`",
                 mention_author=False,
             )
             return
@@ -456,18 +465,20 @@ class AgentCog(commands.Cog):
             channel=message.channel,
         )
         if resolved is None:
-            await self._offer_repo_picker_message(message=message, prompt=prompt)
+            await self._offer_repo_picker_message(
+                message=message, agent_prompt=agent_prompt
+            )
             return
 
         await self._launch_new_agent_from_message(
-            message=message, prompt=prompt, project=resolved
+            message=message, agent_prompt=agent_prompt, project=resolved
         )
 
     async def _offer_repo_picker(
         self,
         *,
         interaction: discord.Interaction,
-        prompt: str,
+        agent_prompt: AgentPrompt,
         branch: str | None,
     ) -> None:
         # Defer before list_repos — Cursor API can exceed Discord's 3s window.
@@ -494,14 +505,14 @@ class AgentCog(commands.Cog):
         ) -> None:
             await self._launch_new_agent(
                 interaction=pick_interaction,
-                prompt=prompt,
+                agent_prompt=agent_prompt,
                 project=project,
                 announce_channel=interaction.channel,
             )
 
         view = RepoPickerView(
             self.bot,
-            prompt=prompt,
+            prompt=agent_prompt,
             repo_urls=urls,
             branch=branch,
             on_picked=on_picked,
@@ -509,13 +520,13 @@ class AgentCog(commands.Cog):
             channel=interaction.channel,
         )
         await interaction.followup.send(
-            f"Pick a repo for: **{_truncate_prompt(prompt)}**",
+            f"Pick a repo for: **{_truncate_prompt(agent_prompt.display)}**",
             view=view,
             ephemeral=True,
         )
 
     async def _offer_repo_picker_message(
-        self, *, message: discord.Message, prompt: str
+        self, *, message: discord.Message, agent_prompt: AgentPrompt
     ) -> None:
         try:
             urls = await self.bot.cursor.list_repos()
@@ -536,14 +547,14 @@ class AgentCog(commands.Cog):
         ) -> None:
             await self._launch_new_agent(
                 interaction=pick_interaction,
-                prompt=prompt,
+                agent_prompt=agent_prompt,
                 project=project,
                 announce_channel=message.channel,
             )
 
         view = RepoPickerView(
             self.bot,
-            prompt=prompt,
+            prompt=agent_prompt,
             repo_urls=urls,
             branch=None,
             on_picked=on_picked,
@@ -551,7 +562,7 @@ class AgentCog(commands.Cog):
             channel=message.channel,
         )
         await message.reply(
-            f"Pick a repo for: **{_truncate_prompt(prompt)}**",
+            f"Pick a repo for: **{_truncate_prompt(agent_prompt.display)}**",
             view=view,
             mention_author=False,
         )
@@ -583,7 +594,7 @@ class AgentCog(commands.Cog):
         self,
         *,
         interaction: discord.Interaction,
-        prompt: str,
+        agent_prompt: AgentPrompt,
         project: Project,
         announce_channel: discord.abc.Messageable | None,
     ) -> None:
@@ -594,7 +605,7 @@ class AgentCog(commands.Cog):
 
         embed = build_starter_embed(
             agent_id="pending",
-            prompt=prompt,
+            prompt=agent_prompt.display,
             project=display_project_alias(project.alias),
             repo=project.repo,
             status="starting",
@@ -606,11 +617,11 @@ class AgentCog(commands.Cog):
             await interaction.response.defer(ephemeral=True, thinking=True)
         placeholder = await channel.send(embed=embed)
         await _clear_deferred_thinking(interaction, placeholder)
-        thread = await self._ensure_thread(channel, placeholder, prompt)
+        thread = await self._ensure_thread(channel, placeholder, agent_prompt.display)
         await self._run_create(
             status_message=placeholder,
             thread=thread,
-            prompt=prompt,
+            agent_prompt=agent_prompt,
             project=project,
         )
 
@@ -618,7 +629,7 @@ class AgentCog(commands.Cog):
         self,
         *,
         message: discord.Message,
-        prompt: str,
+        agent_prompt: AgentPrompt,
         project: Project,
     ) -> None:
         channel = message.channel
@@ -628,18 +639,18 @@ class AgentCog(commands.Cog):
         placeholder = await message.reply(
             embed=build_starter_embed(
                 agent_id="pending",
-                prompt=prompt,
+                prompt=agent_prompt.display,
                 project=display_project_alias(project.alias),
                 repo=project.repo,
                 status="starting",
             ),
             mention_author=False,
         )
-        thread = await self._ensure_thread(channel, placeholder, prompt)
+        thread = await self._ensure_thread(channel, placeholder, agent_prompt.display)
         await self._run_create(
             status_message=placeholder,
             thread=thread,
-            prompt=prompt,
+            agent_prompt=agent_prompt,
             project=project,
         )
 
@@ -664,7 +675,7 @@ class AgentCog(commands.Cog):
         *,
         status_message: discord.Message,
         thread: discord.Thread,
-        prompt: str,
+        agent_prompt: AgentPrompt,
         project: Project,
     ) -> None:
         embed = status_message.embeds[0] if status_message.embeds else None
@@ -680,7 +691,7 @@ class AgentCog(commands.Cog):
                 summary = str(data["error"])
             embed = build_starter_embed(
                 agent_id=agent_id,
-                prompt=prompt,
+                prompt=agent_prompt.display,
                 project=display_project_alias(project.alias),
                 repo=project.repo,
                 status=state,
@@ -702,7 +713,7 @@ class AgentCog(commands.Cog):
 
         try:
             outcome = await self.bot.cursor.create_and_run(
-                prompt=prompt,
+                prompt=agent_prompt.sdk_message(),
                 repo_url=project.repo,
                 branch=project.branch,
                 model=project.model,
@@ -720,7 +731,7 @@ class AgentCog(commands.Cog):
 
         embed = build_starter_embed(
             agent_id=outcome.agent_id,
-            prompt=prompt,
+            prompt=agent_prompt.display,
             project=display_project_alias(project.alias),
             repo=project.repo,
             status=outcome.status,
@@ -750,14 +761,14 @@ class AgentCog(commands.Cog):
         *,
         interaction: discord.Interaction,
         agent_id: str,
-        prompt: str,
+        agent_prompt: AgentPrompt,
         repo: str,
         project_alias: str | None,
     ) -> None:
         status_msg = await interaction.followup.send(
             embed=build_starter_embed(
                 agent_id=agent_id,
-                prompt=prompt,
+                prompt=agent_prompt.display,
                 project=project_alias,
                 repo=repo,
                 status="starting",
@@ -766,7 +777,7 @@ class AgentCog(commands.Cog):
         await self._drive_follow_up(
             status_message=status_msg,
             agent_id=agent_id,
-            prompt=prompt,
+            agent_prompt=agent_prompt,
             repo=repo,
             project_alias=project_alias,
         )
@@ -776,14 +787,14 @@ class AgentCog(commands.Cog):
         *,
         message: discord.Message,
         agent_id: str,
-        prompt: str,
+        agent_prompt: AgentPrompt,
         repo: str,
         project_alias: str | None,
     ) -> None:
         status_msg = await message.reply(
             embed=build_starter_embed(
                 agent_id=agent_id,
-                prompt=prompt,
+                prompt=agent_prompt.display,
                 project=project_alias,
                 repo=repo,
                 status="starting",
@@ -793,7 +804,7 @@ class AgentCog(commands.Cog):
         await self._drive_follow_up(
             status_message=status_msg,
             agent_id=agent_id,
-            prompt=prompt,
+            agent_prompt=agent_prompt,
             repo=repo,
             project_alias=project_alias,
         )
@@ -803,7 +814,7 @@ class AgentCog(commands.Cog):
         *,
         status_message: discord.Message,
         agent_id: str,
-        prompt: str,
+        agent_prompt: AgentPrompt,
         repo: str,
         project_alias: str | None,
     ) -> None:
@@ -816,7 +827,7 @@ class AgentCog(commands.Cog):
                 state = "error"
             embed = build_starter_embed(
                 agent_id=agent_id,
-                prompt=prompt,
+                prompt=agent_prompt.display,
                 project=project_alias,
                 repo=repo,
                 status=state,
@@ -838,7 +849,9 @@ class AgentCog(commands.Cog):
 
         try:
             outcome = await self.bot.cursor.follow_up(
-                agent_id=agent_id, prompt=prompt, on_status=on_status
+                agent_id=agent_id,
+                prompt=agent_prompt.sdk_message(),
+                on_status=on_status,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("follow_up failed")
@@ -849,7 +862,7 @@ class AgentCog(commands.Cog):
 
         embed = build_starter_embed(
             agent_id=outcome.agent_id,
-            prompt=prompt,
+            prompt=agent_prompt.display,
             project=project_alias,
             repo=repo,
             status=outcome.status,

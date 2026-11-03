@@ -14,7 +14,10 @@ from cursor_sdk import (
     CloudRepository,
     CursorAgentError,
     RunResult,
+    UserMessage,
 )
+
+AgentMessage = str | UserMessage
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +70,7 @@ class CursorAgentService:
     async def create_and_run(
         self,
         *,
-        prompt: str,
+        prompt: AgentMessage,
         repo_url: str,
         branch: str | None = None,
         model: str | None = None,
@@ -110,7 +113,7 @@ class CursorAgentService:
         self,
         *,
         agent_id: str,
-        prompt: str,
+        prompt: AgentMessage,
         on_status: StatusCallback | None = None,
     ) -> RunOutcome:
         agent = await self.client.resume_agent(

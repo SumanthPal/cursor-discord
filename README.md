@@ -2,7 +2,7 @@
 
 Discord → [Cursor cloud agents](https://cursor.com/docs/cloud-agent/api/endpoints).
 
-**Use:** `@Clippy <prompt>` or `/ask` · reply in the thread to steer · Cancel / Open PR on the card.
+**Use:** `@Clippy <prompt>` or `/ask` (attach images on the same message) · reply in the thread to steer · Cancel / Open PR on the card.
 
 First repo pick writes `cursor-repo:owner/repo` into the channel topic (needs **Manage Channels**). After that, asks in that channel skip the picker. Override anytime with `/ask` + `repo:`.
 

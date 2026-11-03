@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot.agent_ref import is_agent_id
+from bot.multimodal import AgentPrompt
 from bot.projects import Project, parse_channel_repo, set_channel_repo_topic
 from bot.repo_refs import DISCORD_VALUE_MAX, repo_path
 
@@ -38,7 +39,7 @@ class RepoPickerView(discord.ui.View):
         self,
         bot: CursorDiscordBot,
         *,
-        prompt: str,
+        prompt: AgentPrompt,
         repo_urls: list[str],
         branch: str | None,
         on_picked: OnRepoPicked,
