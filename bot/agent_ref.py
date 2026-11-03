@@ -184,7 +184,7 @@ def parse_agent_ref_from_embed(embed: discord.Embed) -> AgentRef | None:
 async def find_agent_ref_in_channel(
     channel: discord.abc.Messageable, *, bot_user_id: int, limit: int = 50
 ) -> AgentRef | None:
-    # Newest first so a later /agent card in the same thread wins over the starter.
+    # Newest first so a later /ask card in the same thread wins over the starter.
     async for message in channel.history(limit=limit, oldest_first=False):
         ref = parse_agent_ref_from_message(message, bot_user_id=bot_user_id)
         if ref:
@@ -204,7 +204,7 @@ def _tip_for_status(status: str) -> str:
     if _is_active(status):
         return "_Working in the cloud — reply in this thread when it’s done to continue._"
     if (status or "").lower() in {"error", "cancelled", "canceled"}:
-        return "_You can retry with `/agent` or `/talk`._"
+        return "_Retry with `/ask` or reply in the thread._"
     return "_Reply in this thread to send a follow-up to the same agent._"
 
 

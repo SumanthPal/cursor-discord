@@ -1,12 +1,6 @@
-# Optional YAML nicknames only. Preferred UX:
-#   @Clippy / /ask → pick a Cursor-connected repo → Remember (channel topic)
-# Channel topic marker (no YAML needed):
-#   cursor-repo:owner/repo
+# Optional. Prefer channel topic: cursor-repo:owner/repo (auto-set on first pick).
 #
-# Copy to projects.yaml or set PROJECTS_JSON only if you want slash aliases.
-
 # default: instinct
-#
 # projects:
 #   instinct:
 #     repo: https://github.com/your-org/your-repo

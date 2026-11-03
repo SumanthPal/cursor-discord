@@ -14,13 +14,7 @@ from bot.agent_ref import (
 )
 from bot.projects import Project, set_channel_project_topic
 from bot.repo_refs import decode_repo_ref, encode_repo_ref
-from bot.ui import (
-    RememberRepoView,
-    RepoPickerView,
-    controls_for,
-    short_repo_label,
-    should_offer_remember,
-)
+from bot.ui import RepoPickerView, controls_for, short_repo_label
 
 if TYPE_CHECKING:
     from bot.main import CursorDiscordBot
@@ -30,23 +24,10 @@ logger = logging.getLogger(__name__)
 # Discord message content hard limit (embeds use a higher cap).
 DISCORD_CONTENT_MAX = 2000
 
-HELP_TEXT = """**Clippy — quick guide**
-
-**Start** (either works)
-• `@Clippy <what to do>`
-• `/ask prompt:…` — same thing as a slash command
-• No channel default yet? You’ll get a repo picker. Hit **Remember …** to pin it on the channel topic (`cursor-repo:owner/repo`).
-
-**Steer**
-• Reply in the agent’s **thread** — that’s the same cloud agent
-• Status card buttons: Cancel · Status · Open PR
-
-**Optional**
-• `/ask` with `repo:` autocomplete to override the channel default
-• `/repos` to list Cursor-connected GitHub repos
-• `/talk` only if you must target a `bc-…` id outside its thread
-
-Full transcript lives in Cursor’s cloud agent UI — Discord shows progress + summary.
+HELP_TEXT = """**Clippy**
+• `@Clippy …` or `/ask` to start
+• First repo pick pins the channel (`cursor-repo:…` in topic)
+• Reply in the thread to steer · Cancel / Open PR on the card
 """
 
 
@@ -117,72 +98,54 @@ class AgentCog(commands.Cog):
     async def help_cmd(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(HELP_TEXT, ephemeral=True)
 
-    @app_commands.command(
-        name="ask",
-        description="Start a Cursor cloud agent (@Clippy … also works)",
-    )
+    @app_commands.command(name="ask", description="Start a Cursor cloud agent")
     @app_commands.describe(
-        prompt="What the agent should do",
-        repo="Optional repo override (autocomplete) — else channel default / picker",
-        branch="Starting branch (default: channel/main)",
-        project="Optional YAML nickname (advanced)",
+        prompt="What to do",
+        repo="Repo override (autocomplete); else channel default or picker",
     )
     async def ask_cmd(
         self,
         interaction: discord.Interaction,
         prompt: str,
         repo: str | None = None,
-        branch: str | None = None,
-        project: str | None = None,
     ) -> None:
-        await self._start_from_slash(
-            interaction,
+        denied = self.bot.policy.authorize(
+            user=interaction.user, guild=interaction.guild
+        )
+        if denied:
+            await interaction.response.send_message(denied, ephemeral=True)
+            return
+
+        resolved_repo = None
+        if repo:
+            try:
+                resolved_repo = decode_repo_ref(repo, self.bot.repo_ref_cache)
+            except ValueError:
+                resolved_repo = repo
+        resolved = self._resolve_project(
+            project=None,
+            repo=resolved_repo,
+            branch=None,
+            channel=interaction.channel,
+        )
+        if resolved is None:
+            await self._offer_repo_picker(
+                interaction=interaction,
+                prompt=prompt,
+                branch=None,
+            )
+            return
+
+        await self._launch_new_agent(
+            interaction=interaction,
             prompt=prompt,
-            project=project,
-            repo=repo,
-            branch=branch,
+            project=resolved,
+            announce_channel=interaction.channel,
         )
 
     @ask_cmd.autocomplete("repo")
     async def ask_repo_autocomplete(
         self, interaction: discord.Interaction, current: str
-    ) -> list[app_commands.Choice[str]]:
-        return await self._repo_autocomplete(current)
-
-    @app_commands.command(
-        name="agent",
-        description="Same as /ask (kept for muscle memory)",
-    )
-    @app_commands.describe(
-        prompt="What the agent should do",
-        project="Optional YAML nickname (advanced)",
-        repo="Optional repo override (autocomplete)",
-        branch="Starting branch (default: channel/main)",
-    )
-    async def agent_cmd(
-        self,
-        interaction: discord.Interaction,
-        prompt: str,
-        project: str | None = None,
-        repo: str | None = None,
-        branch: str | None = None,
-    ) -> None:
-        await self._start_from_slash(
-            interaction,
-            prompt=prompt,
-            project=project,
-            repo=repo,
-            branch=branch,
-        )
-
-    @agent_cmd.autocomplete("repo")
-    async def agent_repo_autocomplete(
-        self, interaction: discord.Interaction, current: str
-    ) -> list[app_commands.Choice[str]]:
-        return await self._repo_autocomplete(current)
-
-    async def _repo_autocomplete(
-        self, current: str
     ) -> list[app_commands.Choice[str]]:
         try:
             urls = await self.bot.cursor.list_repos()
@@ -206,49 +169,6 @@ class AgentCog(commands.Cog):
             if len(choices) >= 25:
                 break
         return choices
-
-    async def _start_from_slash(
-        self,
-        interaction: discord.Interaction,
-        *,
-        prompt: str,
-        project: str | None,
-        repo: str | None,
-        branch: str | None,
-    ) -> None:
-        denied = self.bot.policy.authorize(
-            user=interaction.user, guild=interaction.guild
-        )
-        if denied:
-            await interaction.response.send_message(denied, ephemeral=True)
-            return
-
-        resolved_repo = None
-        if repo:
-            try:
-                resolved_repo = decode_repo_ref(repo, self.bot.repo_ref_cache)
-            except ValueError:
-                resolved_repo = repo
-        resolved = self._resolve_project(
-            project=project,
-            repo=resolved_repo,
-            branch=branch,
-            channel=interaction.channel,
-        )
-        if resolved is None:
-            await self._offer_repo_picker(
-                interaction=interaction,
-                prompt=prompt,
-                branch=branch,
-            )
-            return
-
-        await self._launch_new_agent(
-            interaction=interaction,
-            prompt=prompt,
-            project=resolved,
-            announce_channel=interaction.channel,
-        )
 
     @app_commands.command(
         name="repos",
@@ -279,7 +199,7 @@ class AgentCog(commands.Cog):
             return
         # Compact labels only — full URLs blow past Discord's 2000-char content cap.
         lines = [f"• `{short_repo_label(u)}`" for u in urls]
-        footer = "\nUse `@Clippy …` or `/ask` — pick from the menu, or pass `repo:`."
+        footer = "\n`@Clippy …` or `/ask` to start."
         pages = chunk_discord_lines(
             f"**{len(urls)} Cursor-connected repo(s)**",
             lines,
@@ -290,7 +210,7 @@ class AgentCog(commands.Cog):
 
     @app_commands.command(
         name="talk",
-        description="Advanced: follow-up by bc-… id (prefer replying in the thread)",
+        description="Follow-up by agent id (prefer thread reply)",
     )
     @app_commands.describe(
         agent_id="Cloud agent id (bc-…)",
@@ -425,9 +345,7 @@ class AgentCog(commands.Cog):
         aliases = self.bot.registry.aliases()
         if not aliases:
             await interaction.response.send_message(
-                "No YAML nicknames configured — that’s fine.\n"
-                "Use `@Clippy …` or `/ask`, pick a repo, then **Remember** it "
-                "for this channel (writes `cursor-repo:…` into the topic).",
+                "No nicknames. Use `@Clippy` / `/ask` — first pick pins the channel.",
                 ephemeral=True,
             )
             return
@@ -519,8 +437,7 @@ class AgentCog(commands.Cog):
         prompt = _strip_mention(message.content, self.bot.user)
         if not prompt:
             await message.reply(
-                "Usage: `@Clippy <what to do>` — or `/ask prompt:…`.\n"
-                "No channel default yet? You’ll get a repo picker.",
+                "`@Clippy <what to do>` or `/ask`",
                 mention_author=False,
             )
             return
@@ -587,6 +504,7 @@ class AgentCog(commands.Cog):
             branch=branch,
             on_picked=on_picked,
             owner_id=interaction.user.id,
+            channel=interaction.channel,
         )
         await interaction.followup.send(
             f"Pick a repo for: **{_truncate_prompt(prompt)}**",
@@ -606,8 +524,7 @@ class AgentCog(commands.Cog):
             return
         if not urls:
             await message.reply(
-                "No Cursor-connected repos found. Link GitHub in Cursor, "
-                "or use `/agent` with `repo:`.",
+                "No Cursor-connected repos. Link GitHub in Cursor, or `/ask` + `repo:`.",
                 mention_author=False,
             )
             return
@@ -615,7 +532,6 @@ class AgentCog(commands.Cog):
         async def on_picked(
             pick_interaction: discord.Interaction, project: Project
         ) -> None:
-            # Picker already deferred; launch from the original channel.
             await self._launch_new_agent(
                 interaction=pick_interaction,
                 prompt=prompt,
@@ -630,6 +546,7 @@ class AgentCog(commands.Cog):
             branch=None,
             on_picked=on_picked,
             owner_id=message.author.id,
+            channel=message.channel,
         )
         await message.reply(
             f"Pick a repo for: **{_truncate_prompt(prompt)}**",
@@ -688,15 +605,6 @@ class AgentCog(commands.Cog):
         placeholder = await channel.send(embed=embed)
         await _clear_deferred_thinking(interaction, placeholder)
         thread = await self._ensure_thread(channel, placeholder, prompt)
-        await thread.send(
-            "Thread linked to this run. **Reply here** to steer the same agent."
-        )
-        await self._maybe_offer_remember(
-            channel=channel,
-            repo_url=project.repo,
-            owner_id=interaction.user.id,
-            via_interaction=interaction,
-        )
         await self._run_create(
             status_message=placeholder,
             thread=thread,
@@ -726,56 +634,12 @@ class AgentCog(commands.Cog):
             mention_author=False,
         )
         thread = await self._ensure_thread(channel, placeholder, prompt)
-        if thread.id != getattr(channel, "id", None):
-            await thread.send(
-                "Thread linked to this run. **Reply here** to steer the same agent."
-            )
-        await self._maybe_offer_remember(
-            channel=channel,
-            repo_url=project.repo,
-            owner_id=message.author.id,
-            via_message=message,
-        )
         await self._run_create(
             status_message=placeholder,
             thread=thread,
             prompt=prompt,
             project=project,
         )
-
-    async def _maybe_offer_remember(
-        self,
-        *,
-        channel: discord.abc.Messageable,
-        repo_url: str,
-        owner_id: int,
-        via_interaction: discord.Interaction | None = None,
-        via_message: discord.Message | None = None,
-    ) -> None:
-        if not should_offer_remember(channel, repo_url):
-            return
-        assert isinstance(channel, discord.TextChannel)
-        view = RememberRepoView(
-            self.bot,
-            repo_url=repo_url,
-            channel=channel,
-            owner_id=owner_id,
-        )
-        content = (
-            f"Pin `{short_repo_label(repo_url)}` as the default for "
-            f"#{channel.name}? Next `@Clippy` / `/ask` here skips the picker."
-        )
-        try:
-            if via_interaction is not None:
-                await via_interaction.followup.send(
-                    content, view=view, ephemeral=True
-                )
-            elif via_message is not None:
-                await via_message.reply(
-                    content, view=view, mention_author=False
-                )
-        except discord.HTTPException:
-            logger.warning("failed to offer remember-repo", exc_info=True)
 
     async def _ensure_thread(
         self,
@@ -874,15 +738,10 @@ class AgentCog(commands.Cog):
         except discord.HTTPException:
             await thread.send(embed=embed, view=view)
 
-        bits = [
-            f"**{outcome.status.title()}.** Agent `{outcome.agent_id}`.",
-            "Reply in this thread to continue.",
-        ]
-        if outcome.branch:
-            bits.append(f"Branch `{outcome.branch}`")
+        bits = [f"**{outcome.status.title()}.** `{outcome.agent_id}` — reply to continue."]
         if outcome.pr_url:
-            bits.append(f"PR: {outcome.pr_url}")
-        await thread.send(" · ".join(bits))
+            bits.append(outcome.pr_url)
+        await thread.send(" ".join(bits))
 
     async def _follow_up(
         self,
