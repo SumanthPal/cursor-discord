@@ -22,7 +22,8 @@ CHANNEL_REPO_RE = re.compile(
 class Project:
     alias: str
     repo: str
-    branch: str
+    # None → omit startingRef; Cursor uses the repo's default branch.
+    branch: str | None = None
     model: str | None = None
 
 
@@ -54,7 +55,7 @@ class ProjectRegistry:
         4. Channel topic `cursor-project:…` (YAML nickname)
         5. Registry default alias
         """
-        branch_s = (branch or "main").strip() or "main"
+        branch_s = _normalize_branch(branch)
 
         if repo and repo.strip():
             return Project(
@@ -72,7 +73,7 @@ class ProjectRegistry:
             return Project(
                 alias=found.alias,
                 repo=found.repo,
-                branch=(branch or found.branch).strip() or found.branch,
+                branch=branch_s if branch_s is not None else found.branch,
                 model=found.model or default_model,
             )
 
@@ -99,7 +100,7 @@ class ProjectRegistry:
         return Project(
             alias=found.alias,
             repo=found.repo,
-            branch=(branch or found.branch).strip() or found.branch,
+            branch=branch_s if branch_s is not None else found.branch,
             model=found.model or default_model,
         )
 
@@ -111,6 +112,13 @@ def normalize_repo(value: str) -> str:
     if value.count("/") == 1 and " " not in value:
         return f"https://github.com/{value}"
     return value.rstrip("/")
+
+
+def _normalize_branch(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def parse_channel_project(topic: str | None) -> str | None:
@@ -172,7 +180,9 @@ def _parse_registry(data: dict[str, Any]) -> ProjectRegistry:
         projects[alias.lower()] = Project(
             alias=alias.lower(),
             repo=normalize_repo(str(repo)),
-            branch=str(cfg.get("branch") or "main"),
+            branch=_normalize_branch(
+                str(cfg["branch"]) if cfg.get("branch") is not None else None
+            ),
             model=(str(cfg["model"]) if cfg.get("model") else None),
         )
     default = data.get("default")

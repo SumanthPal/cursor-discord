@@ -356,7 +356,8 @@ class AgentCog(commands.Cog):
             p = self.bot.registry.get(alias)
             assert p is not None
             mark = " (default)" if alias == default else ""
-            lines.append(f"- **{alias}**{mark}: `{p.repo}` @ `{p.branch}`")
+            ref = p.branch or "default"
+            lines.append(f"- **{alias}**{mark}: `{p.repo}` @ `{ref}`")
         pages = chunk_discord_lines("**Project nicknames**", lines)
         await interaction.response.send_message(pages[0], ephemeral=True)
         for page in pages[1:]:

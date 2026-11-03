@@ -103,7 +103,7 @@ class RepoPickerView(discord.ui.View):
         project = Project(
             alias="_explicit",
             repo=url,
-            branch=(self.branch or "main").strip() or "main",
+            branch=(self.branch or "").strip() or None,
             model=self.bot.settings.cursor_model,
         )
         self.stop()
