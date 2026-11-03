@@ -103,7 +103,9 @@ jobs:
           IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${ARTIFACT_REPO}/${SERVICE}"
           FULL="${IMAGE}:${TAG}"
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
-          gcloud builds submit --tag "${FULL}" .
+          # --suppress-logs: deploy SA often can't stream the default logs bucket;
+          # without this, gcloud exits 1 even when the build succeeds.
+          gcloud builds submit --tag "${FULL}" . --suppress-logs
           echo "image=${FULL}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy Cloud Run
