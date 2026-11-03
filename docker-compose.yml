@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    image: cursor-discord:local
+    env_file: .env
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - ./projects.yaml:/app/projects.yaml:ro
+    restart: unless-stopped
