@@ -102,7 +102,8 @@ class RepoPickerView(discord.ui.View):
             model=self.bot.settings.cursor_model,
         )
         # Public defer so followup status card is visible in-channel.
-        await interaction.response.defer(ephemeral=False, thinking=True)
+        # Ephemeral defer — status card is posted via channel.send (long-lived).
+        await interaction.response.defer(ephemeral=True, thinking=True)
         self.stop()
         await self.on_picked(interaction, project)
 
