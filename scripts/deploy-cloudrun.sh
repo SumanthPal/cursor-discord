@@ -51,8 +51,26 @@ TAG="$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)"
 FULL_IMAGE="${IMAGE}:${TAG}"
 
 echo "Building ${FULL_IMAGE}"
-# --suppress-logs: avoid exit 1 when caller can't stream the default logs bucket
-gcloud builds submit --tag "${FULL_IMAGE}" . --suppress-logs
+# Async + poll: waiting with log streaming fails for SAs that can't read the
+# default Cloud Build logs bucket (even with --suppress-logs).
+BUILD_ID="$(gcloud builds submit --tag "${FULL_IMAGE}" . --async --format='value(id)')"
+echo "Cloud Build ${BUILD_ID}"
+STATUS=""
+for _ in $(seq 1 60); do
+  STATUS="$(gcloud builds describe "${BUILD_ID}" --format='value(status)')"
+  case "${STATUS}" in
+    SUCCESS) break ;;
+    FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED)
+      echo "Cloud Build ${BUILD_ID} failed: ${STATUS}" >&2
+      exit 1
+      ;;
+  esac
+  sleep 5
+done
+if [[ "${STATUS}" != "SUCCESS" ]]; then
+  echo "Timed out waiting for Cloud Build ${BUILD_ID} (last=${STATUS:-unknown})" >&2
+  exit 1
+fi
 
 # PROJECTS_JSON from local file if present
 PROJECTS_JSON_VALUE="${PROJECTS_JSON:-}"
