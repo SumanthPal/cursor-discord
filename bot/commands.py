@@ -24,22 +24,10 @@ logger = logging.getLogger(__name__)
 # Discord message content hard limit (embeds use a higher cap).
 DISCORD_CONTENT_MAX = 2000
 
-HELP_TEXT = """**Clippy — quick guide**
-
-**Start work**
-• `/agent prompt:…` — pick a repo from the menu (Cursor-connected GitHub)
-• Or pass `repo:` / autocomplete, or `@bot …` and pick from the menu
-• Optional nicknames: `/project list` + `/project bind` (YAML aliases)
-
-**Continue**
-• Reply in the agent’s thread (same cloud agent)
-• Or `/talk agent_id:bc-… prompt:…`
-
-**Controls**
-• `/repos` · `/status` · `/cancel` · buttons on the status card
-• Full transcript lives in Cursor’s cloud agent UI — Discord only shows progress + summary
-
-Bot chrome (embeds/buttons) is template UI. Only the agent **Summary** text comes from the model.
+HELP_TEXT = """**Clippy**
+• `@Clippy …` or `/ask` to start
+• First repo pick pins the channel (`cursor-repo:…` in topic)
+• Reply in the thread to steer · Cancel / Open PR on the card
 """
 
 
@@ -58,10 +46,15 @@ def chunk_discord_lines(
     footer: str = "",
     limit: int = DISCORD_CONTENT_MAX,
 ) -> list[str]:
-    """Pack lines into one or more Discord messages under `limit` chars each."""
+    """Pack lines into Discord messages under `limit` chars each.
+
+    When `footer` is set, every page reserves space for it so the last page
+    can append the footer without dropping lines or spinning on rsplit.
+    """
+    # Reserve "\n" + footer on every page so the last page can append safely.
+    footer_room = (1 + len(footer)) if footer else 0
+    body_limit = max(1, limit - footer_room)
     chunks: list[str] = []
-    # Reserve room for footer on the last chunk; earlier chunks omit it.
-    body_limit = limit
     current = header
     for line in lines:
         candidate = f"{current}\n{line}" if current else line
@@ -70,7 +63,6 @@ def chunk_discord_lines(
             continue
         if current:
             chunks.append(current)
-        # Single line longer than the limit — hard clip.
         current = clip_discord(line, body_limit) if len(line) > body_limit else line
     if current:
         chunks.append(current)
@@ -78,18 +70,16 @@ def chunk_discord_lines(
         chunks = [header or "_(empty)_"]
     if footer:
         last = chunks[-1]
-        joined = f"{last}\n{footer}"
-        if len(joined) <= limit:
-            chunks[-1] = joined
-        else:
-            # Drop overflow lines from the last chunk until footer fits.
-            kept = last
-            while kept and len(f"{kept}\n{footer}") > limit:
-                kept = kept.rsplit("\n", 1)[0]
-            chunks[-1] = (
-                f"{kept}\n{footer}" if kept else clip_discord(footer, limit)
-            )
+        joined = f"{last}\n{footer}" if last else footer
+        chunks[-1] = clip_discord(joined, limit)
     return [clip_discord(c, limit) for c in chunks]
+
+
+def display_project_alias(alias: str | None) -> str | None:
+    """Hide internal resolve aliases from Discord chrome."""
+    if not alias or alias.startswith("_"):
+        return None
+    return alias
 
 
 class AgentCog(commands.Cog):
@@ -110,20 +100,16 @@ class AgentCog(commands.Cog):
     async def help_cmd(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(HELP_TEXT, ephemeral=True)
 
-    @app_commands.command(name="agent", description="Create a Cursor cloud agent")
+    @app_commands.command(name="ask", description="Start a Cursor cloud agent")
     @app_commands.describe(
-        prompt="What the agent should do",
-        project="Optional nickname from projects registry",
-        repo="Cursor-connected repo (autocomplete) or owner/repo URL",
-        branch="Starting branch (default from project or main)",
+        prompt="What to do",
+        repo="Repo override (autocomplete); else channel default or picker",
     )
-    async def agent_cmd(
+    async def ask_cmd(
         self,
         interaction: discord.Interaction,
         prompt: str,
-        project: str | None = None,
         repo: str | None = None,
-        branch: str | None = None,
     ) -> None:
         denied = self.bot.policy.authorize(
             user=interaction.user, guild=interaction.guild
@@ -139,16 +125,16 @@ class AgentCog(commands.Cog):
             except ValueError:
                 resolved_repo = repo
         resolved = self._resolve_project(
-            project=project,
+            project=None,
             repo=resolved_repo,
-            branch=branch,
+            branch=None,
             channel=interaction.channel,
         )
         if resolved is None:
             await self._offer_repo_picker(
                 interaction=interaction,
                 prompt=prompt,
-                branch=branch,
+                branch=None,
             )
             return
 
@@ -159,8 +145,8 @@ class AgentCog(commands.Cog):
             announce_channel=interaction.channel,
         )
 
-    @agent_cmd.autocomplete("repo")
-    async def agent_repo_autocomplete(
+    @ask_cmd.autocomplete("repo")
+    async def ask_repo_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         try:
@@ -215,17 +201,17 @@ class AgentCog(commands.Cog):
             return
         # Compact labels only — full URLs blow past Discord's 2000-char content cap.
         lines = [f"• `{short_repo_label(u)}`" for u in urls]
-        footer = "\nUse `/agent` and pick from the menu, or `repo:` autocomplete."
         pages = chunk_discord_lines(
             f"**{len(urls)} Cursor-connected repo(s)**",
             lines,
-            footer=footer,
+            footer="`@Clippy …` or `/ask` to start.",
         )
         for page in pages:
             await interaction.followup.send(page, ephemeral=True)
 
     @app_commands.command(
-        name="talk", description="Send a follow-up to an existing cloud agent"
+        name="talk",
+        description="Follow-up by agent id (prefer thread reply)",
     )
     @app_commands.describe(
         agent_id="Cloud agent id (bc-…)",
@@ -360,9 +346,7 @@ class AgentCog(commands.Cog):
         aliases = self.bot.registry.aliases()
         if not aliases:
             await interaction.response.send_message(
-                "No optional project nicknames configured — that’s fine.\n"
-                "Use `/agent` and pick a Cursor-connected repo from the menu "
-                "(or `/repos` to list them).",
+                "No nicknames. Use `@Clippy` / `/ask` — first pick pins the channel.",
                 ephemeral=True,
             )
             return
@@ -454,8 +438,7 @@ class AgentCog(commands.Cog):
         prompt = _strip_mention(message.content, self.bot.user)
         if not prompt:
             await message.reply(
-                "Usage: `@bot <prompt>` in a project-bound channel, "
-                "or `/agent prompt:… project:…`",
+                "`@Clippy <what to do>` or `/ask`",
                 mention_author=False,
             )
             return
@@ -522,6 +505,7 @@ class AgentCog(commands.Cog):
             branch=branch,
             on_picked=on_picked,
             owner_id=interaction.user.id,
+            channel=interaction.channel,
         )
         await interaction.followup.send(
             f"Pick a repo for: **{_truncate_prompt(prompt)}**",
@@ -541,8 +525,7 @@ class AgentCog(commands.Cog):
             return
         if not urls:
             await message.reply(
-                "No Cursor-connected repos found. Link GitHub in Cursor, "
-                "or use `/agent` with `repo:`.",
+                "No Cursor-connected repos. Link GitHub in Cursor, or `/ask` + `repo:`.",
                 mention_author=False,
             )
             return
@@ -550,7 +533,6 @@ class AgentCog(commands.Cog):
         async def on_picked(
             pick_interaction: discord.Interaction, project: Project
         ) -> None:
-            # Picker already deferred; launch from the original channel.
             await self._launch_new_agent(
                 interaction=pick_interaction,
                 prompt=prompt,
@@ -565,6 +547,7 @@ class AgentCog(commands.Cog):
             branch=None,
             on_picked=on_picked,
             owner_id=message.author.id,
+            channel=message.channel,
         )
         await message.reply(
             f"Pick a repo for: **{_truncate_prompt(prompt)}**",
@@ -611,7 +594,7 @@ class AgentCog(commands.Cog):
         embed = build_starter_embed(
             agent_id="pending",
             prompt=prompt,
-            project=project.alias if project.alias != "_explicit" else None,
+            project=display_project_alias(project.alias),
             repo=project.repo,
             status="starting",
         )
@@ -623,9 +606,6 @@ class AgentCog(commands.Cog):
         placeholder = await channel.send(embed=embed)
         await _clear_deferred_thinking(interaction, placeholder)
         thread = await self._ensure_thread(channel, placeholder, prompt)
-        await thread.send(
-            "Thread linked to this run. **Reply here** after it finishes to continue."
-        )
         await self._run_create(
             status_message=placeholder,
             thread=thread,
@@ -648,17 +628,13 @@ class AgentCog(commands.Cog):
             embed=build_starter_embed(
                 agent_id="pending",
                 prompt=prompt,
-                project=project.alias if project.alias != "_explicit" else None,
+                project=display_project_alias(project.alias),
                 repo=project.repo,
                 status="starting",
             ),
             mention_author=False,
         )
         thread = await self._ensure_thread(channel, placeholder, prompt)
-        if thread.id != getattr(channel, "id", None):
-            await thread.send(
-                "Thread linked to this run. **Reply here** after it finishes to continue."
-            )
         await self._run_create(
             status_message=placeholder,
             thread=thread,
@@ -704,7 +680,7 @@ class AgentCog(commands.Cog):
             embed = build_starter_embed(
                 agent_id=agent_id,
                 prompt=prompt,
-                project=project.alias if project.alias != "_explicit" else None,
+                project=display_project_alias(project.alias),
                 repo=project.repo,
                 status=state,
                 run_id=data.get("run_id"),
@@ -744,7 +720,7 @@ class AgentCog(commands.Cog):
         embed = build_starter_embed(
             agent_id=outcome.agent_id,
             prompt=prompt,
-            project=project.alias if project.alias != "_explicit" else None,
+            project=display_project_alias(project.alias),
             repo=project.repo,
             status=outcome.status,
             summary=outcome.result_text or outcome.error_message,
@@ -763,15 +739,10 @@ class AgentCog(commands.Cog):
         except discord.HTTPException:
             await thread.send(embed=embed, view=view)
 
-        bits = [
-            f"**{outcome.status.title()}.** Agent `{outcome.agent_id}`.",
-            "Reply in this thread to continue.",
-        ]
-        if outcome.branch:
-            bits.append(f"Branch `{outcome.branch}`")
+        bits = [f"**{outcome.status.title()}.** `{outcome.agent_id}` — reply to continue."]
         if outcome.pr_url:
-            bits.append(f"PR: {outcome.pr_url}")
-        await thread.send(" · ".join(bits))
+            bits.append(outcome.pr_url)
+        await thread.send(" ".join(bits))
 
     async def _follow_up(
         self,

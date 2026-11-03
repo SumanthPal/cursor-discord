@@ -1,12 +1,7 @@
-# Optional nicknames only. Preferred UX: /agent → pick from Cursor-connected
-# repos in Discord (/repos lists them). Leave empty if you only use the picker.
+# Optional. Prefer channel topic: cursor-repo:owner/repo (auto-set on first pick).
 #
-# Copy to projects.yaml or set PROJECTS_JSON on Cloud Run if you want aliases.
-
 # default: instinct
-#
 # projects:
 #   instinct:
 #     repo: https://github.com/your-org/your-repo
 #     branch: main
-
