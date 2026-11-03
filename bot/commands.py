@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 import discord
@@ -8,7 +9,10 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.agent_ref import (
-    build_starter_embed,
+    chat_done,
+    chat_failed,
+    chat_progress,
+    chat_working,
     find_agent_ref_in_channel,
     is_agent_id,
 )
@@ -23,12 +27,100 @@ logger = logging.getLogger(__name__)
 
 # Discord message content hard limit (embeds use a higher cap).
 DISCORD_CONTENT_MAX = 2000
+# Don't spam Discord while the cloud agent is cloning / thinking.
+_PROGRESS_MIN_INTERVAL_SEC = 20.0
 
 HELP_TEXT = """**Clippy**
-• `@Clippy …` or `/ask` to start
-• First repo pick pins the channel (`cursor-repo:…` in topic)
-• Reply in the thread to steer · Cancel / Open PR on the card
+• `@Clippy …` or `/ask` to start → opens a thread
+• Wait for **your turn** in that thread, then reply (no @) to steer
+• First repo pick pins the channel (`cursor-repo:…`)
 """
+
+
+class _RunBoard:
+    """Edits one Discord message through on-it → still-working → your-turn."""
+
+    def __init__(
+        self,
+        bot: CursorDiscordBot,
+        message: discord.Message,
+        *,
+        repo: str | None,
+    ) -> None:
+        self.bot = bot
+        self.message = message
+        self.repo = repo
+        self.agent_id = "pending"
+        self._started_at = time.monotonic()
+        self._last_progress_at = 0.0
+        self._last_text = message.content or ""
+
+    async def set_working(self, *, agent_id: str | None = None) -> None:
+        if agent_id and is_agent_id(agent_id):
+            self.agent_id = agent_id
+        text = chat_working(repo=self.repo, agent_id=self.agent_id if is_agent_id(self.agent_id) else None)
+        view = controls_for(self.bot, agent_id=self.agent_id, status="running")
+        await self._edit(text, view=view)
+
+    async def maybe_progress(
+        self,
+        *,
+        agent_id: str | None,
+        run_id: str | None,
+        snippet: str | None,
+        force: bool = False,
+    ) -> None:
+        if agent_id and is_agent_id(agent_id):
+            self.agent_id = agent_id
+        now = time.monotonic()
+        if not force and (now - self._last_progress_at) < _PROGRESS_MIN_INTERVAL_SEC:
+            return
+        self._last_progress_at = now
+        text = chat_progress(
+            snippet=snippet,
+            agent_id=self.agent_id if is_agent_id(self.agent_id) else None,
+            run_id=run_id,
+            elapsed_sec=now - self._started_at,
+        )
+        view = controls_for(self.bot, agent_id=self.agent_id, status="running")
+        await self._edit(text, view=view)
+
+    async def finish(
+        self,
+        *,
+        agent_id: str,
+        status: str,
+        summary: str | None,
+        run_id: str | None,
+        pr_url: str | None,
+    ) -> None:
+        self.agent_id = agent_id
+        text = chat_done(
+            agent_id=agent_id,
+            status=status,
+            summary=summary,
+            run_id=run_id,
+            pr_url=pr_url,
+            repo=self.repo,
+        )
+        view = controls_for(
+            self.bot, agent_id=agent_id, status=status, pr_url=pr_url
+        )
+        await self._edit(text, view=view)
+
+    async def fail(self, exc: object) -> None:
+        await self._edit(chat_failed(exc), view=None)
+
+    async def _edit(
+        self, content: str, *, view: discord.ui.View | None
+    ) -> None:
+        if content == self._last_text and view is None:
+            return
+        self._last_text = content
+        try:
+            await self.message.edit(content=content, embed=None, view=view)
+        except discord.HTTPException:
+            logger.warning("failed to edit run board", exc_info=True)
 
 
 def clip_discord(text: str, limit: int = DISCORD_CONTENT_MAX) -> str:
@@ -405,49 +497,85 @@ class AgentCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
+        try:
+            await self._on_message_inner(message)
+        except Exception:
+            logger.exception(
+                "on_message failed (author=%s channel=%s)",
+                getattr(message.author, "id", None),
+                getattr(message.channel, "id", None),
+            )
+
+    async def _on_message_inner(self, message: discord.Message) -> None:
         if message.author.bot:
             return
         if self.bot.user is None:
             return
 
-        # Thread follow-ups to an existing agent
+        # Thread follow-ups to an existing agent (any non-empty reply)
         if isinstance(message.channel, discord.Thread):
             ref = await find_agent_ref_in_channel(
                 message.channel, bot_user_id=self.bot.user.id
             )
             if ref and not _is_bot_mention_only(message, self.bot.user):
-                # Ignore slash-induced empties; require non-empty text
                 prompt = message.content.strip()
                 if prompt and not message.content.startswith("/"):
-                    denied = self.bot.policy.authorize(
-                        user=message.author, guild=message.guild
-                    )
-                    if denied:
-                        await message.reply(denied, mention_author=False)
+                    # Prefer starting a new agent when they clearly @Clippy.
+                    if not _message_addresses_bot(message, self.bot.user):
+                        denied = self.bot.policy.authorize(
+                            user=message.author, guild=message.guild
+                        )
+                        if denied:
+                            await message.reply(denied, mention_author=False)
+                            return
+                        await self._follow_up_message(
+                            message=message,
+                            agent_id=ref.agent_id,
+                            prompt=prompt,
+                            repo=ref.repo or "(existing agent)",
+                            project_alias=ref.project,
+                        )
                         return
-                    await self._follow_up_message(
-                        message=message,
-                        agent_id=ref.agent_id,
-                        prompt=prompt,
-                        repo=ref.repo or "(existing agent)",
-                        project_alias=ref.project,
-                    )
-                    return
 
-        if self.bot.user not in message.mentions:
+        if not _message_addresses_bot(message, self.bot.user):
             return
-        prompt = _strip_mention(message.content, self.bot.user)
+
+        # Ping with empty body ⇒ Message Content Intent usually off in the portal
+        # (slash commands still work — they don't need that intent).
+        if not (message.content or "").strip() and self.bot.user in message.mentions:
+            try:
+                await message.reply(
+                    "I saw the ping but no message text. Enable **Message Content "
+                    "Intent** (Developer Portal → Bot → Privileged Gateway Intents), "
+                    "save, then `@Clippy …` again. `/ask` keeps working either way.",
+                    mention_author=False,
+                )
+            except discord.HTTPException:
+                logger.warning("could not warn about message content intent", exc_info=True)
+            return
+
+        prompt = _strip_bot_address(message.content, self.bot.user)
         if not prompt:
-            await message.reply(
-                "`@Clippy <what to do>` or `/ask`",
-                mention_author=False,
-            )
+            try:
+                await message.reply(
+                    "`@Clippy <what to do>` or `/ask`",
+                    mention_author=False,
+                )
+            except discord.HTTPException:
+                logger.warning("could not reply to empty @Clippy", exc_info=True)
             return
 
         denied = self.bot.policy.authorize(user=message.author, guild=message.guild)
         if denied:
             await message.reply(denied, mention_author=False)
             return
+
+        logger.info(
+            "@Clippy from %s in #%s: %s",
+            message.author.id,
+            getattr(message.channel, "name", message.channel.id),
+            _truncate_prompt(prompt),
+        )
 
         resolved = self._resolve_project(
             project=None,
@@ -592,21 +720,15 @@ class AgentCog(commands.Cog):
             await interaction.followup.send("Need a text channel or thread.")
             return
 
-        embed = build_starter_embed(
-            agent_id="pending",
-            prompt=prompt,
-            project=display_project_alias(project.alias),
-            repo=project.repo,
-            status="starting",
-        )
-        # Acknowledge the interaction (clears Discord's 3s / thinking UI), but
-        # post the status card via channel.send so later edits use the bot
-        # token — interaction webhook tokens expire after ~15 minutes.
+        # Channel message (bot token) so edits outlive the ~15m interaction webhook.
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=True)
-        placeholder = await channel.send(embed=embed)
+        placeholder = await channel.send(chat_working(repo=project.repo))
         await _clear_deferred_thinking(interaction, placeholder)
         thread = await self._ensure_thread(channel, placeholder, prompt)
+        await thread.send(
+            "I'll post updates here. When you see **your turn**, reply to steer."
+        )
         await self._run_create(
             status_message=placeholder,
             thread=thread,
@@ -626,16 +748,14 @@ class AgentCog(commands.Cog):
             await message.reply("Need a text channel.", mention_author=False)
             return
         placeholder = await message.reply(
-            embed=build_starter_embed(
-                agent_id="pending",
-                prompt=prompt,
-                project=display_project_alias(project.alias),
-                repo=project.repo,
-                status="starting",
-            ),
+            chat_working(repo=project.repo),
             mention_author=False,
         )
         thread = await self._ensure_thread(channel, placeholder, prompt)
+        if thread.id != getattr(channel, "id", None):
+            await thread.send(
+                "I'll post updates here. When you see **your turn**, reply to steer."
+            )
         await self._run_create(
             status_message=placeholder,
             thread=thread,
@@ -667,38 +787,34 @@ class AgentCog(commands.Cog):
         prompt: str,
         project: Project,
     ) -> None:
-        embed = status_message.embeds[0] if status_message.embeds else None
+        board = _RunBoard(self.bot, status_message, repo=project.repo)
 
         async def on_status(state: str, data: dict) -> None:
-            nonlocal embed
-            if embed is None:
-                return
-            agent_id = data.get("agent_id") or "pending"
-            summary = data.get("snippet") or data.get("result")
+            agent_id = data.get("agent_id")
             if data.get("error"):
-                state = "error"
-                summary = str(data["error"])
-            embed = build_starter_embed(
-                agent_id=agent_id,
-                prompt=prompt,
-                project=display_project_alias(project.alias),
-                repo=project.repo,
-                status=state,
-                run_id=data.get("run_id"),
-                summary=summary,
-                pr_url=data.get("pr_url"),
-                branch=data.get("branch"),
-            )
-            view = controls_for(
-                self.bot,
-                agent_id=agent_id,
-                status=state,
-                pr_url=data.get("pr_url"),
-            )
-            try:
-                await status_message.edit(embed=embed, view=view)
-            except discord.HTTPException:
-                logger.warning("failed to edit status message", exc_info=True)
+                await board.finish(
+                    agent_id=agent_id or board.agent_id,
+                    status="error",
+                    summary=str(data["error"]),
+                    run_id=data.get("run_id"),
+                    pr_url=data.get("pr_url"),
+                )
+                return
+            key = (state or "").lower()
+            if key in {"created", "starting"}:
+                await board.set_working(agent_id=agent_id)
+            elif key == "running":
+                await board.maybe_progress(
+                    agent_id=agent_id,
+                    run_id=data.get("run_id"),
+                    snippet=None,
+                )
+            elif key == "streaming":
+                await board.maybe_progress(
+                    agent_id=agent_id,
+                    run_id=data.get("run_id"),
+                    snippet=data.get("snippet") or data.get("result"),
+                )
 
         try:
             outcome = await self.bot.cursor.create_and_run(
@@ -715,19 +831,25 @@ class AgentCog(commands.Cog):
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("create_and_run failed")
-            await thread.send(f"Agent failed to start: `{exc}`")
+            await board.fail(exc)
+            await thread.send(chat_failed(exc))
             return
 
-        embed = build_starter_embed(
+        await board.finish(
             agent_id=outcome.agent_id,
-            prompt=prompt,
-            project=display_project_alias(project.alias),
-            repo=project.repo,
             status=outcome.status,
             summary=outcome.result_text or outcome.error_message,
             run_id=outcome.run_id,
             pr_url=outcome.pr_url,
-            branch=outcome.branch,
+        )
+        # Thread bump so it's obvious even if the starter message scrolled away.
+        cue = chat_done(
+            agent_id=outcome.agent_id,
+            status=outcome.status,
+            summary=outcome.result_text or outcome.error_message,
+            run_id=outcome.run_id,
+            pr_url=outcome.pr_url,
+            repo=project.repo,
         )
         view = controls_for(
             self.bot,
@@ -735,15 +857,7 @@ class AgentCog(commands.Cog):
             status=outcome.status,
             pr_url=outcome.pr_url,
         )
-        try:
-            await status_message.edit(embed=embed, view=view)
-        except discord.HTTPException:
-            await thread.send(embed=embed, view=view)
-
-        bits = [f"**{outcome.status.title()}.** `{outcome.agent_id}` — reply to continue."]
-        if outcome.pr_url:
-            bits.append(outcome.pr_url)
-        await thread.send(" ".join(bits))
+        await thread.send(cue, view=view)
 
     async def _follow_up(
         self,
@@ -754,21 +868,15 @@ class AgentCog(commands.Cog):
         repo: str,
         project_alias: str | None,
     ) -> None:
+        _ = project_alias
         status_msg = await interaction.followup.send(
-            embed=build_starter_embed(
-                agent_id=agent_id,
-                prompt=prompt,
-                project=project_alias,
-                repo=repo,
-                status="starting",
-            )
+            chat_working(repo=repo, agent_id=agent_id)
         )
         await self._drive_follow_up(
             status_message=status_msg,
             agent_id=agent_id,
             prompt=prompt,
             repo=repo,
-            project_alias=project_alias,
         )
 
     async def _follow_up_message(
@@ -780,14 +888,9 @@ class AgentCog(commands.Cog):
         repo: str,
         project_alias: str | None,
     ) -> None:
+        _ = project_alias
         status_msg = await message.reply(
-            embed=build_starter_embed(
-                agent_id=agent_id,
-                prompt=prompt,
-                project=project_alias,
-                repo=repo,
-                status="starting",
-            ),
+            chat_working(repo=repo, agent_id=agent_id),
             mention_author=False,
         )
         await self._drive_follow_up(
@@ -795,7 +898,6 @@ class AgentCog(commands.Cog):
             agent_id=agent_id,
             prompt=prompt,
             repo=repo,
-            project_alias=project_alias,
         )
 
     async def _drive_follow_up(
@@ -805,36 +907,35 @@ class AgentCog(commands.Cog):
         agent_id: str,
         prompt: str,
         repo: str,
-        project_alias: str | None,
     ) -> None:
-        embed = status_message.embeds[0] if status_message.embeds else None
+        board = _RunBoard(self.bot, status_message, repo=repo)
+        board.agent_id = agent_id
 
         async def on_status(state: str, data: dict) -> None:
-            nonlocal embed
-            summary = data.get("snippet") or data.get("result") or data.get("error")
             if data.get("error"):
-                state = "error"
-            embed = build_starter_embed(
-                agent_id=agent_id,
-                prompt=prompt,
-                project=project_alias,
-                repo=repo,
-                status=state,
-                summary=summary,
-                run_id=data.get("run_id"),
-                pr_url=data.get("pr_url"),
-                branch=data.get("branch"),
-            )
-            view = controls_for(
-                self.bot,
-                agent_id=agent_id,
-                status=state,
-                pr_url=data.get("pr_url"),
-            )
-            try:
-                await status_message.edit(embed=embed, view=view)
-            except discord.HTTPException:
-                pass
+                await board.finish(
+                    agent_id=agent_id,
+                    status="error",
+                    summary=str(data["error"]),
+                    run_id=data.get("run_id"),
+                    pr_url=data.get("pr_url"),
+                )
+                return
+            key = (state or "").lower()
+            if key in {"created", "starting"}:
+                await board.set_working(agent_id=agent_id)
+            elif key == "running":
+                await board.maybe_progress(
+                    agent_id=agent_id,
+                    run_id=data.get("run_id"),
+                    snippet=None,
+                )
+            elif key == "streaming":
+                await board.maybe_progress(
+                    agent_id=agent_id,
+                    run_id=data.get("run_id"),
+                    snippet=data.get("snippet") or data.get("result"),
+                )
 
         try:
             outcome = await self.bot.cursor.follow_up(
@@ -842,43 +943,54 @@ class AgentCog(commands.Cog):
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("follow_up failed")
-            await status_message.reply(
-                f"Follow-up failed: `{exc}`", mention_author=False
-            )
+            await board.fail(exc)
             return
 
-        embed = build_starter_embed(
+        await board.finish(
             agent_id=outcome.agent_id,
-            prompt=prompt,
-            project=project_alias,
-            repo=repo,
             status=outcome.status,
             summary=outcome.result_text or outcome.error_message,
             run_id=outcome.run_id,
             pr_url=outcome.pr_url,
-            branch=outcome.branch,
         )
-        view = controls_for(
-            self.bot,
-            agent_id=outcome.agent_id,
-            status=outcome.status,
-            pr_url=outcome.pr_url,
-        )
-        try:
-            await status_message.edit(embed=embed, view=view)
-        except discord.HTTPException:
-            pass
+
+
+def _message_addresses_bot(
+    message: discord.Message, bot_user: discord.ClientUser
+) -> bool:
+    """True for a real ping or a soft `@Clippy …` / `Clippy, …` address."""
+    if bot_user in message.mentions:
+        return True
+    content = message.content or ""
+    if f"<@{bot_user.id}>" in content or f"<@!{bot_user.id}>" in content:
+        return True
+    # Soft address when someone types the name without picking the mention chip.
+    name = (bot_user.display_name or bot_user.name or "clippy").lower()
+    lowered = content.lstrip().lower()
+    return lowered.startswith(f"@{name}") or lowered.startswith(f"{name} ")
+
+
+def _strip_bot_address(content: str, bot_user: discord.ClientUser) -> str:
+    text = content or ""
+    for form in (f"<@{bot_user.id}>", f"<@!{bot_user.id}>"):
+        text = text.replace(form, "")
+    name = (bot_user.display_name or bot_user.name or "Clippy").strip()
+    # Strip leading @Name / Name,
+    lowered = text.lstrip()
+    for prefix in (f"@{name}", name):
+        if lowered.lower().startswith(prefix.lower()):
+            lowered = lowered[len(prefix) :]
+            break
+    return lowered.lstrip(" ,:").strip()
 
 
 def _strip_mention(content: str, bot_user: discord.ClientUser) -> str:
-    text = content
-    for form in (f"<@{bot_user.id}>", f"<@!{bot_user.id}>"):
-        text = text.replace(form, "")
-    return text.strip()
+    # Back-compat alias
+    return _strip_bot_address(content, bot_user)
 
 
 def _is_bot_mention_only(message: discord.Message, bot_user: discord.ClientUser) -> bool:
-    return not _strip_mention(message.content, bot_user)
+    return not _strip_bot_address(message.content, bot_user)
 
 
 def _thread_name(prompt: str) -> str:
