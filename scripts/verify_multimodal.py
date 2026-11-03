@@ -108,6 +108,26 @@ def verify_prompt_images() -> None:
     print("PASS prompt.images UserMessage wire format")
 
 
+def verify_mention_only_with_attachments() -> None:
+    from bot.commands import _is_bot_mention_only
+
+    class BotUser:
+        id = 999
+
+    class Msg:
+        def __init__(self, content: str, attachments: list[object]) -> None:
+            self.content = content
+            self.attachments = attachments
+
+    bot = BotUser()
+    assert _is_bot_mention_only(Msg("<@999>", []), bot)  # type: ignore[arg-type]
+    assert not _is_bot_mention_only(
+        Msg("<@999>", [object()]), bot
+    )  # type: ignore[arg-type]
+    assert not _is_bot_mention_only(Msg("", [object()]), bot)  # type: ignore[arg-type]
+    print("PASS image-only / mention+image not treated as mention-only")
+
+
 async def verify_artifact_delivery() -> None:
     thread = FakeThread()
     cursor = FakeCursorService()
@@ -141,9 +161,51 @@ async def verify_artifact_delivery() -> None:
     print("PASS dedupe: second delivery skipped already-posted artifacts")
 
 
+async def verify_artifact_retry_after_upload_failure() -> None:
+    import discord
+    from unittest.mock import MagicMock
+
+    thread = FakeThread()
+    cursor = FakeCursorService()
+    posted: set[str] = set()
+    agent_id = "bc-00000000-0000-0000-0000-000000000002"
+
+    class FailingThread(FakeThread):
+        fail_once = True
+
+        async def send(self, content=None, files=None, **_kwargs) -> None:
+            if files and self.fail_once:
+                self.fail_once = False
+                resp = MagicMock()
+                resp.status = 500
+                resp.reason = "Internal Server Error"
+                raise discord.HTTPException(resp, "simulated upload failure")
+            await super().send(content=content, files=files)
+
+    failing = FailingThread()
+    first = await deliver_new_cloud_artifacts(
+        thread=failing,
+        cursor=cursor,  # type: ignore[arg-type]
+        agent_id=agent_id,
+        posted=posted,
+    )
+    assert first == 0
+    assert not posted
+    second = await deliver_new_cloud_artifacts(
+        thread=thread,
+        cursor=cursor,  # type: ignore[arg-type]
+        agent_id=agent_id,
+        posted=posted,
+    )
+    assert second == 2
+    print("PASS artifact retry after failed Discord upload")
+
+
 async def main() -> None:
     verify_prompt_images()
+    verify_mention_only_with_attachments()
     await verify_artifact_delivery()
+    await verify_artifact_retry_after_upload_failure()
     print("\nVERIFICATION OK — multimodal input + cloud artifact delivery")
 
 

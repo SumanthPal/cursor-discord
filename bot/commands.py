@@ -978,6 +978,9 @@ def _strip_mention(content: str, bot_user: discord.ClientUser) -> str:
 
 
 def _is_bot_mention_only(message: discord.Message, bot_user: discord.ClientUser) -> bool:
+    """True when the message is only an @Clippy ping with no prompt or files."""
+    if message.attachments:
+        return False
     return not _strip_mention(message.content, bot_user)
 
 

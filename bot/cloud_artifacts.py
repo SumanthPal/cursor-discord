@@ -83,6 +83,7 @@ async def deliver_new_cloud_artifacts(
     delivered = 0
     batch_files: list[discord.File] = []
     batch_labels: list[str] = []
+    batch_fps: list[str] = []
     header_sent = False
 
     def header() -> str:
@@ -92,21 +93,27 @@ async def deliver_new_cloud_artifacts(
             else "**Agent artifact**"
         )
 
-    async def flush_batch() -> None:
-        nonlocal batch_files, batch_labels, header_sent
+    async def flush_batch() -> list[str]:
+        """Upload the current batch; return fingerprints to mark posted on success."""
+        nonlocal batch_files, batch_labels, batch_fps, header_sent
         if not batch_files:
-            return
+            return []
+        fps = list(batch_fps)
         prefix = header() if not header_sent else ""
         header_sent = True
         content = "\n".join(f"• `{label}`" for label in batch_labels)
         if prefix:
             content = f"{prefix}\n{content}"
-        try:
-            await thread.send(content=content, files=batch_files)
-        except discord.HTTPException:
-            logger.warning("artifact batch upload failed", exc_info=True)
+        files = batch_files
         batch_files = []
         batch_labels = []
+        batch_fps = []
+        try:
+            await thread.send(content=content, files=files)
+            return fps
+        except discord.HTTPException:
+            logger.warning("artifact batch upload failed", exc_info=True)
+            return []
 
     for artifact in pending:
         fp = artifact_fingerprint(artifact)
@@ -114,7 +121,6 @@ async def deliver_new_cloud_artifacts(
             data = await cursor.download_artifact(agent_id, artifact.path)
         except Exception as exc:  # noqa: BLE001
             logger.warning("download_artifact %s failed: %s", artifact.path, exc)
-            posted.add(fp)
             await thread.send(
                 f"Could not download `{artifact.path}`: {exc}",
             )
@@ -131,22 +137,29 @@ async def deliver_new_cloud_artifacts(
 
         if is_image_artifact(artifact.path) or is_video_artifact(artifact.path):
             if len(batch_files) >= 10:
-                await flush_batch()
+                done = await flush_batch()
+                delivered += len(done)
+                posted.update(done)
             batch_files.append(discord.File(io.BytesIO(data), filename=name))
             batch_labels.append(name)
-            posted.add(fp)
-            delivered += 1
+            batch_fps.append(fp)
             continue
 
-        posted.add(fp)
         try:
+            prefix = header() if not header_sent else ""
+            header_sent = True
+            body = f"{prefix}\n`{name}`" if prefix else f"`{name}`"
             await thread.send(
-                content=f"`{name}`",
+                content=body,
                 file=discord.File(io.BytesIO(data), filename=name),
             )
+            posted.add(fp)
             delivered += 1
         except discord.HTTPException:
             logger.warning("artifact upload failed for %s", artifact.path, exc_info=True)
 
-    await flush_batch()
+    done = await flush_batch()
+    delivered += len(done)
+    posted.update(done)
+
     return delivered
