@@ -103,10 +103,27 @@ jobs:
           IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${ARTIFACT_REPO}/${SERVICE}"
           FULL="${IMAGE}:${TAG}"
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
-          # --suppress-logs: deploy SA often can't stream the default logs bucket;
-          # without this, gcloud exits 1 even when the build succeeds.
-          gcloud builds submit --tag "${FULL}" . --suppress-logs
-          echo "image=${FULL}" >> "$GITHUB_OUTPUT"
+          # Submit async + poll status. Waiting with log streaming fails for the
+          # deploy SA (default logs bucket ACL) even when --suppress-logs is set.
+          BUILD_ID="$(gcloud builds submit --tag "${FULL}" . --async --format='value(id)')"
+          echo "Cloud Build ${BUILD_ID} → ${FULL}"
+          for _ in $(seq 1 60); do
+            STATUS="$(gcloud builds describe "${BUILD_ID}" --format='value(status)')"
+            case "${STATUS}" in
+              SUCCESS)
+                echo "image=${FULL}" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED)
+                echo "Cloud Build ${BUILD_ID} failed: ${STATUS}" >&2
+                echo "Logs: https://console.cloud.google.com/cloud-build/builds/${BUILD_ID}?project=${PROJECT}" >&2
+                exit 1
+                ;;
+            esac
+            sleep 5
+          done
+          echo "Timed out waiting for Cloud Build ${BUILD_ID} (last=${STATUS:-unknown})" >&2
+          exit 1
 
       - name: Deploy Cloud Run
         env:
