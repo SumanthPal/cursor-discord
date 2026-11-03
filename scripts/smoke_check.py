@@ -123,6 +123,27 @@ def test_imports() -> None:
     print("ok imports")
 
 
+def test_repo_refs() -> None:
+    from bot.repo_refs import decode_repo_ref, encode_repo_ref
+
+    cache: dict[str, str] = {}
+    long_url = (
+        "https://github.com/some-org/"
+        + ("very-long-repo-name-" * 8)
+        + "final"
+    )
+    assert len(long_url) > 100
+    key = encode_repo_ref(long_url, cache)
+    assert len(key) <= 100
+    assert decode_repo_ref(key, cache) == long_url.rstrip("/")
+
+    short = "https://github.com/acme/app"
+    key2 = encode_repo_ref(short, cache)
+    assert key2 == "acme/app"
+    assert decode_repo_ref(key2, cache) == short
+    print("ok repo_refs")
+
+
 def main() -> None:
     test_imports()
     test_projects_json()
@@ -130,6 +151,7 @@ def main() -> None:
     test_channel_bind()
     test_agent_embed()
     test_policy()
+    test_repo_refs()
     print("ALL SMOKE CHECKS PASSED")
 
 

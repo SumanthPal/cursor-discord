@@ -13,6 +13,7 @@ from bot.agent_ref import (
     is_agent_id,
 )
 from bot.projects import Project, set_channel_project_topic
+from bot.repo_refs import decode_repo_ref, encode_repo_ref
 from bot.ui import RepoPickerView, controls_for, short_repo_label
 
 if TYPE_CHECKING:
@@ -79,9 +80,15 @@ class AgentCog(commands.Cog):
             await interaction.response.send_message(denied, ephemeral=True)
             return
 
+        resolved_repo = None
+        if repo:
+            try:
+                resolved_repo = decode_repo_ref(repo, self.bot.repo_ref_cache)
+            except ValueError:
+                resolved_repo = repo
         resolved = self._resolve_project(
             project=project,
-            repo=repo,
+            repo=resolved_repo,
             branch=branch,
             channel=interaction.channel,
         )
@@ -120,7 +127,10 @@ class AgentCog(commands.Cog):
                 and current_l not in url.lower()
             ):
                 continue
-            choices.append(app_commands.Choice(name=label[:100], value=url[:100]))
+            value = encode_repo_ref(url, self.bot.repo_ref_cache)
+            choices.append(
+                app_commands.Choice(name=label[:100], value=value[:100])
+            )
             if len(choices) >= 25:
                 break
         return choices

@@ -3,12 +3,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
-
 import discord
 
 from bot.agent_ref import is_agent_id
 from bot.projects import Project
+from bot.repo_refs import DISCORD_VALUE_MAX, repo_path
 
 if TYPE_CHECKING:
     from bot.main import CursorDiscordBot
@@ -19,11 +18,17 @@ OnRepoPicked = Callable[[discord.Interaction, Project], Awaitable[None]]
 
 
 def short_repo_label(url: str) -> str:
-    path = urlparse(url).path.strip("/")
-    if path.endswith(".git"):
-        path = path[:-4]
-    label = path or url
-    return label[:100]
+    """Display label only — may truncate. Never use as a clone URL."""
+    label = repo_path(url)
+    if len(label) <= DISCORD_VALUE_MAX:
+        return label
+    return label[: DISCORD_VALUE_MAX - 1] + "…"
+
+
+def _desc(url: str) -> str:
+    if len(url) <= DISCORD_VALUE_MAX:
+        return url
+    return url[: DISCORD_VALUE_MAX - 1] + "…"
 
 
 class RepoPickerView(discord.ui.View):
@@ -43,15 +48,17 @@ class RepoPickerView(discord.ui.View):
         self.prompt = prompt
         self.branch = branch
         self.on_picked = on_picked
+        # Discord select values max 100 chars — never put the URL in `value`.
+        # Index keys map back to the full URL list.
+        self._urls = [u.rstrip("/") for u in repo_urls[:25]]
 
         options: list[discord.SelectOption] = []
-        for url in repo_urls[:25]:
-            label = short_repo_label(url)
+        for i, url in enumerate(self._urls):
             options.append(
                 discord.SelectOption(
-                    label=label,
-                    value=url[:100],
-                    description=url[:100],
+                    label=short_repo_label(url),
+                    value=str(i),
+                    description=_desc(url),
                 )
             )
         select = discord.ui.Select(
@@ -65,7 +72,14 @@ class RepoPickerView(discord.ui.View):
 
     async def _picked(self, interaction: discord.Interaction) -> None:
         assert isinstance(self.children[0], discord.ui.Select)
-        url = self.children[0].values[0]
+        key = self.children[0].values[0]
+        try:
+            url = self._urls[int(key)]
+        except (ValueError, IndexError) as exc:
+            await interaction.response.send_message(
+                f"Invalid repo selection: {exc}", ephemeral=True
+            )
+            return
         project = Project(
             alias="_explicit",
             repo=url,

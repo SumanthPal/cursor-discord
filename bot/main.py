@@ -38,6 +38,8 @@ class CursorDiscordBot(commands.Bot):
         self.registry = registry
         self.policy = policy
         self.cursor = cursor
+        # Short Discord choice values → full repo URLs (autocomplete).
+        self.repo_ref_cache: dict[str, str] = {}
         self._http_runner: web.AppRunner | None = None
 
     async def setup_hook(self) -> None:
