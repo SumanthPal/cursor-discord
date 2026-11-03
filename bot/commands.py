@@ -21,7 +21,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-HELP_TEXT = """**Cursor Discord — quick guide**
+# Discord message content hard limit (embeds use a higher cap).
+DISCORD_CONTENT_MAX = 2000
+
+HELP_TEXT = """**Clippy — quick guide**
 
 **Start work**
 • `/agent prompt:…` — pick a repo from the menu (Cursor-connected GitHub)
@@ -40,6 +43,55 @@ Bot chrome (embeds/buttons) is template UI. Only the agent **Summary** text come
 """
 
 
+def clip_discord(text: str, limit: int = DISCORD_CONTENT_MAX) -> str:
+    """Keep a single Discord content body under the API limit."""
+    if len(text) <= limit:
+        return text
+    suffix = "…"
+    return text[: max(0, limit - len(suffix))] + suffix
+
+
+def chunk_discord_lines(
+    header: str,
+    lines: list[str],
+    *,
+    footer: str = "",
+    limit: int = DISCORD_CONTENT_MAX,
+) -> list[str]:
+    """Pack lines into one or more Discord messages under `limit` chars each."""
+    chunks: list[str] = []
+    # Reserve room for footer on the last chunk; earlier chunks omit it.
+    body_limit = limit
+    current = header
+    for line in lines:
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) <= body_limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        # Single line longer than the limit — hard clip.
+        current = clip_discord(line, body_limit) if len(line) > body_limit else line
+    if current:
+        chunks.append(current)
+    if not chunks:
+        chunks = [header or "_(empty)_"]
+    if footer:
+        last = chunks[-1]
+        joined = f"{last}\n{footer}"
+        if len(joined) <= limit:
+            chunks[-1] = joined
+        else:
+            # Drop overflow lines from the last chunk until footer fits.
+            kept = last
+            while kept and len(f"{kept}\n{footer}") > limit:
+                kept = kept.rsplit("\n", 1)[0]
+            chunks[-1] = (
+                f"{kept}\n{footer}" if kept else clip_discord(footer, limit)
+            )
+    return [clip_discord(c, limit) for c in chunks]
+
+
 class AgentCog(commands.Cog):
     def __init__(self, bot: CursorDiscordBot) -> None:
         self.bot = bot
@@ -48,13 +100,13 @@ class AgentCog(commands.Cog):
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ) -> None:
         logger.exception("slash error: %s", error)
-        msg = f"Error: {error}"
+        msg = clip_discord(f"Error: {error}")
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
 
-    @app_commands.command(name="help", description="How to use the Cursor Discord bot")
+    @app_commands.command(name="help", description="How to use Clippy")
     async def help_cmd(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(HELP_TEXT, ephemeral=True)
 
@@ -161,15 +213,16 @@ class AgentCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        lines = [f"• `{short_repo_label(u)}` — {u}" for u in urls[:40]]
-        extra = "" if len(urls) <= 40 else f"\n…and {len(urls) - 40} more"
-        await interaction.followup.send(
-            f"**{len(urls)} Cursor-connected repo(s)**\n"
-            + "\n".join(lines)
-            + extra
-            + "\n\nUse `/agent` and pick from the menu, or `repo:` autocomplete.",
-            ephemeral=True,
+        # Compact labels only — full URLs blow past Discord's 2000-char content cap.
+        lines = [f"• `{short_repo_label(u)}`" for u in urls]
+        footer = "\nUse `/agent` and pick from the menu, or `repo:` autocomplete."
+        pages = chunk_discord_lines(
+            f"**{len(urls)} Cursor-connected repo(s)**",
+            lines,
+            footer=footer,
         )
+        for page in pages:
+            await interaction.followup.send(page, ephemeral=True)
 
     @app_commands.command(
         name="talk", description="Send a follow-up to an existing cloud agent"
@@ -240,17 +293,21 @@ class AgentCog(commands.Cog):
             await interaction.followup.send(f"Status failed: {exc}", ephemeral=True)
             return
 
+        summary = str(info.get("summary") or "—")
         lines = [
             f"**agent_id:** `{info['agent_id']}`",
             f"**status:** {info.get('status') or 'unknown'}",
             f"**name:** {info.get('name') or '—'}",
-            f"**summary:** {info.get('summary') or '—'}",
+            f"**summary:** {summary}",
         ]
         if info.get("repos"):
-            lines.append("**repos:** " + ", ".join(info["repos"]))
+            labels = [short_repo_label(r) for r in info["repos"]]
+            lines.append("**repos:** " + ", ".join(f"`{x}`" for x in labels))
         if info.get("active_run_id"):
             lines.append(f"**active_run:** `{info['active_run_id']}`")
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        await interaction.followup.send(
+            clip_discord("\n".join(lines)), ephemeral=True
+        )
 
     @app_commands.command(name="cancel", description="Cancel an active cloud agent run")
     @app_commands.describe(agent_id="Optional agent id; otherwise use this thread")
@@ -303,8 +360,9 @@ class AgentCog(commands.Cog):
         aliases = self.bot.registry.aliases()
         if not aliases:
             await interaction.response.send_message(
-                "No projects configured. Set PROJECTS_JSON or mount projects.yaml, "
-                "or pass `repo:` on `/agent`.",
+                "No optional project nicknames configured — that’s fine.\n"
+                "Use `/agent` and pick a Cursor-connected repo from the menu "
+                "(or `/repos` to list them).",
                 ephemeral=True,
             )
             return
@@ -315,7 +373,10 @@ class AgentCog(commands.Cog):
             assert p is not None
             mark = " (default)" if alias == default else ""
             lines.append(f"- **{alias}**{mark}: `{p.repo}` @ `{p.branch}`")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        pages = chunk_discord_lines("**Project nicknames**", lines)
+        await interaction.response.send_message(pages[0], ephemeral=True)
+        for page in pages[1:]:
+            await interaction.followup.send(page, ephemeral=True)
 
     @project.command(
         name="bind",

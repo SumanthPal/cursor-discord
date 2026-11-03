@@ -51,7 +51,8 @@ TAG="$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)"
 FULL_IMAGE="${IMAGE}:${TAG}"
 
 echo "Building ${FULL_IMAGE}"
-gcloud builds submit --tag "${FULL_IMAGE}" .
+# --suppress-logs: avoid exit 1 when caller can't stream the default logs bucket
+gcloud builds submit --tag "${FULL_IMAGE}" . --suppress-logs
 
 # PROJECTS_JSON from local file if present
 PROJECTS_JSON_VALUE="${PROJECTS_JSON:-}"
