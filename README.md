@@ -6,11 +6,12 @@ Discord command plane for [Cursor cloud agents](https://cursor.com/docs/cloud-ag
 
 | Command | Purpose |
 |---|---|
-| `/agent prompt:… [project\|repo]` | Create cloud agent + thread (embed stores `agent_id`) |
+| `/agent prompt:…` | Create cloud agent — **pick a Cursor-connected repo** in chat (or `repo:` autocomplete) |
+| `/repos` | List repos linked to the Cursor API key |
 | Thread reply | Follow-up on that agent |
 | `/talk agent_id: prompt:` | Follow-up any `bc-…` agent |
 | `/status` `/cancel` | Status / cancel |
-| `/project list` `/project bind` | Aliases + channel topic bind |
+| `/project list` `/project bind` | Optional nickname aliases (YAML), not required |
 
 ## Local
 
