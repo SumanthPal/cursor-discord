@@ -51,6 +51,7 @@ class _RunBoard:
         self.message = message
         self.repo = repo
         self.agent_id = "pending"
+        self._started_at = time.monotonic()
         self._last_progress_at = 0.0
         self._last_text = message.content or ""
 
@@ -79,6 +80,7 @@ class _RunBoard:
             snippet=snippet,
             agent_id=self.agent_id if is_agent_id(self.agent_id) else None,
             run_id=run_id,
+            elapsed_sec=now - self._started_at,
         )
         view = controls_for(self.bot, agent_id=self.agent_id, status="running")
         await self._edit(text, view=view)

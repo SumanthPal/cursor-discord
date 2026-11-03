@@ -83,12 +83,21 @@ def chat_progress(
     snippet: str | None = None,
     agent_id: str | None = None,
     run_id: str | None = None,
+    elapsed_sec: float | None = None,
 ) -> str:
     body = (snippet or "").strip()
+    elapsed = ""
+    if elapsed_sec is not None and elapsed_sec >= 0:
+        mins = int(elapsed_sec // 60)
+        secs = int(elapsed_sec % 60)
+        elapsed = f" ({mins}m{secs:02d}s)" if mins else f" ({secs}s)"
     if body:
-        line = f"still working…\n_{_truncate(body, 400)}_"
+        line = f"still working…{elapsed}\n_{_truncate(body, 400)}_"
     else:
-        line = "still working… (clone / setup can take a minute)"
+        line = (
+            f"still working…{elapsed} — cloud agent is busy "
+            "(clone / tools / thinking). I'll say **your turn** when it's done."
+        )
     trailer = ref_spoiler(agent_id, run_id) if agent_id else ""
     return _truncate(f"{line}\n{trailer}".strip() if trailer else line, 2000)
 
