@@ -13,7 +13,7 @@ from bot.agent_ref import (
     is_agent_id,
 )
 from bot.projects import Project, set_channel_project_topic
-from bot.ui import controls_for
+from bot.ui import RepoPickerView, controls_for, short_repo_label
 
 if TYPE_CHECKING:
     from bot.main import CursorDiscordBot
@@ -23,15 +23,16 @@ logger = logging.getLogger(__name__)
 HELP_TEXT = """**Cursor Discord — quick guide**
 
 **Start work**
-• `/agent prompt:…` plus `project:` or `repo:`
-• Or `@bot …` in a channel bound with `/project bind`
+• `/agent prompt:…` — pick a repo from the menu (Cursor-connected GitHub)
+• Or pass `repo:` / autocomplete, or `@bot …` and pick from the menu
+• Optional nicknames: `/project list` + `/project bind` (YAML aliases)
 
 **Continue**
 • Reply in the agent’s thread (same cloud agent)
 • Or `/talk agent_id:bc-… prompt:…`
 
 **Controls**
-• `/status` · `/cancel` · buttons on the status card
+• `/repos` · `/status` · `/cancel` · buttons on the status card
 • Full transcript lives in Cursor’s cloud agent UI — Discord only shows progress + summary
 
 Bot chrome (embeds/buttons) is template UI. Only the agent **Summary** text comes from the model.
@@ -59,8 +60,8 @@ class AgentCog(commands.Cog):
     @app_commands.command(name="agent", description="Create a Cursor cloud agent")
     @app_commands.describe(
         prompt="What the agent should do",
-        project="Alias from projects registry",
-        repo="owner/repo or full git URL (overrides project)",
+        project="Optional nickname from projects registry",
+        repo="Cursor-connected repo (autocomplete) or owner/repo URL",
         branch="Starting branch (default from project or main)",
     )
     async def agent_cmd(
@@ -85,10 +86,10 @@ class AgentCog(commands.Cog):
             channel=interaction.channel,
         )
         if resolved is None:
-            await interaction.response.send_message(
-                "Could not resolve a repo. Pass `project:` / `repo:`, bind the "
-                "channel with `/project bind`, or set a registry default.",
-                ephemeral=True,
+            await self._offer_repo_picker(
+                interaction=interaction,
+                prompt=prompt,
+                branch=branch,
             )
             return
 
@@ -98,6 +99,67 @@ class AgentCog(commands.Cog):
             prompt=prompt,
             project=resolved,
             announce_channel=interaction.channel,
+        )
+
+    @agent_cmd.autocomplete("repo")
+    async def agent_repo_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        try:
+            urls = await self.bot.cursor.list_repos()
+        except Exception:  # noqa: BLE001
+            logger.exception("repo autocomplete failed")
+            return []
+        current_l = (current or "").lower()
+        choices: list[app_commands.Choice[str]] = []
+        for url in urls:
+            label = short_repo_label(url)
+            if (
+                current_l
+                and current_l not in label.lower()
+                and current_l not in url.lower()
+            ):
+                continue
+            choices.append(app_commands.Choice(name=label[:100], value=url[:100]))
+            if len(choices) >= 25:
+                break
+        return choices
+
+    @app_commands.command(
+        name="repos",
+        description="List GitHub repos connected to your Cursor API key",
+    )
+    async def repos_cmd(self, interaction: discord.Interaction) -> None:
+        denied = self.bot.policy.authorize(
+            user=interaction.user, guild=interaction.guild, consume_rate=False
+        )
+        if denied:
+            await interaction.response.send_message(denied, ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            urls = await self.bot.cursor.list_repos()
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(
+                f"Could not list repos (is CURSOR_API_KEY valid / GitHub linked?): {exc}",
+                ephemeral=True,
+            )
+            return
+        if not urls:
+            await interaction.followup.send(
+                "No repos returned. Connect GitHub in the Cursor dashboard "
+                "for the account that owns this API key.",
+                ephemeral=True,
+            )
+            return
+        lines = [f"• `{short_repo_label(u)}` — {u}" for u in urls[:40]]
+        extra = "" if len(urls) <= 40 else f"\n…and {len(urls) - 40} more"
+        await interaction.followup.send(
+            f"**{len(urls)} Cursor-connected repo(s)**\n"
+            + "\n".join(lines)
+            + extra
+            + "\n\nUse `/agent` and pick from the menu, or `repo:` autocomplete.",
+            ephemeral=True,
         )
 
     @app_commands.command(
@@ -340,15 +402,99 @@ class AgentCog(commands.Cog):
             channel=message.channel,
         )
         if resolved is None:
-            await message.reply(
-                "No project resolved. Use `/project bind`, `/agent` with "
-                "`project:`/`repo:`, or set a registry default.",
-                mention_author=False,
-            )
+            await self._offer_repo_picker_message(message=message, prompt=prompt)
             return
 
         await self._launch_new_agent_from_message(
             message=message, prompt=prompt, project=resolved
+        )
+
+    async def _offer_repo_picker(
+        self,
+        *,
+        interaction: discord.Interaction,
+        prompt: str,
+        branch: str | None,
+    ) -> None:
+        try:
+            urls = await self.bot.cursor.list_repos()
+        except Exception as exc:  # noqa: BLE001
+            await interaction.response.send_message(
+                f"Could not load Cursor repos: {exc}",
+                ephemeral=True,
+            )
+            return
+        if not urls:
+            await interaction.response.send_message(
+                "No Cursor-connected repos found. Link GitHub in the Cursor "
+                "dashboard for this API key, or pass `repo:` explicitly.",
+                ephemeral=True,
+            )
+            return
+
+        async def on_picked(
+            pick_interaction: discord.Interaction, project: Project
+        ) -> None:
+            await self._launch_new_agent(
+                interaction=pick_interaction,
+                prompt=prompt,
+                project=project,
+                announce_channel=interaction.channel,
+            )
+
+        view = RepoPickerView(
+            self.bot,
+            prompt=prompt,
+            repo_urls=urls,
+            branch=branch,
+            on_picked=on_picked,
+        )
+        await interaction.response.send_message(
+            f"Pick a repo for: **{_truncate_prompt(prompt)}**",
+            view=view,
+            ephemeral=True,
+        )
+
+    async def _offer_repo_picker_message(
+        self, *, message: discord.Message, prompt: str
+    ) -> None:
+        try:
+            urls = await self.bot.cursor.list_repos()
+        except Exception as exc:  # noqa: BLE001
+            await message.reply(
+                f"Could not load Cursor repos: `{exc}`", mention_author=False
+            )
+            return
+        if not urls:
+            await message.reply(
+                "No Cursor-connected repos found. Link GitHub in Cursor, "
+                "or use `/agent` with `repo:`.",
+                mention_author=False,
+            )
+            return
+
+        async def on_picked(
+            pick_interaction: discord.Interaction, project: Project
+        ) -> None:
+            # Picker already deferred; launch from the original channel.
+            await self._launch_new_agent(
+                interaction=pick_interaction,
+                prompt=prompt,
+                project=project,
+                announce_channel=message.channel,
+            )
+
+        view = RepoPickerView(
+            self.bot,
+            prompt=prompt,
+            repo_urls=urls,
+            branch=None,
+            on_picked=on_picked,
+        )
+        await message.reply(
+            f"Pick a repo for: **{_truncate_prompt(prompt)}**",
+            view=view,
+            mention_author=False,
         )
 
     def _resolve_project(
@@ -394,7 +540,13 @@ class AgentCog(commands.Cog):
             repo=project.repo,
             status="starting",
         )
-        placeholder = await interaction.followup.send(embed=embed)
+        # Prefer channel send so ephemeral pickers still post a public status card.
+        if isinstance(channel, discord.TextChannel):
+            placeholder = await channel.send(embed=embed)
+        elif isinstance(channel, discord.Thread):
+            placeholder = await channel.send(embed=embed)
+        else:
+            placeholder = await interaction.followup.send(embed=embed)
         thread = await self._ensure_thread(channel, placeholder, prompt)
         await thread.send(
             "Thread linked to this run. **Reply here** after it finishes to continue."
@@ -687,6 +839,13 @@ def _thread_name(prompt: str) -> str:
     if len(cleaned) > 80:
         cleaned = cleaned[:77] + "…"
     return cleaned or "cursor-agent"
+
+
+def _truncate_prompt(prompt: str) -> str:
+    cleaned = " ".join(prompt.split())
+    if len(cleaned) > 120:
+        return cleaned[:117] + "…"
+    return cleaned
 
 
 async def setup(bot: CursorDiscordBot) -> None:

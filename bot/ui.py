@@ -1,16 +1,80 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import discord
 
 from bot.agent_ref import is_agent_id
+from bot.projects import Project
 
 if TYPE_CHECKING:
     from bot.main import CursorDiscordBot
 
 logger = logging.getLogger(__name__)
+
+OnRepoPicked = Callable[[discord.Interaction, Project], Awaitable[None]]
+
+
+def short_repo_label(url: str) -> str:
+    path = urlparse(url).path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    label = path or url
+    return label[:100]
+
+
+class RepoPickerView(discord.ui.View):
+    """Pick a Cursor-connected repo in Discord (no YAML required)."""
+
+    def __init__(
+        self,
+        bot: CursorDiscordBot,
+        *,
+        prompt: str,
+        repo_urls: list[str],
+        branch: str | None,
+        on_picked: OnRepoPicked,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.prompt = prompt
+        self.branch = branch
+        self.on_picked = on_picked
+
+        options: list[discord.SelectOption] = []
+        for url in repo_urls[:25]:
+            label = short_repo_label(url)
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=url[:100],
+                    description=url[:100],
+                )
+            )
+        select = discord.ui.Select(
+            placeholder="Choose a Cursor-connected repo…",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        select.callback = self._picked  # type: ignore[method-assign]
+        self.add_item(select)
+
+    async def _picked(self, interaction: discord.Interaction) -> None:
+        assert isinstance(self.children[0], discord.ui.Select)
+        url = self.children[0].values[0]
+        project = Project(
+            alias="_explicit",
+            repo=url,
+            branch=(self.branch or "main").strip() or "main",
+            model=self.bot.settings.cursor_model,
+        )
+        await interaction.response.defer(ephemeral=False, thinking=True)
+        self.stop()
+        await self.on_picked(interaction, project)
 
 
 class AgentControls(discord.ui.View):
