@@ -46,10 +46,15 @@ def chunk_discord_lines(
     footer: str = "",
     limit: int = DISCORD_CONTENT_MAX,
 ) -> list[str]:
-    """Pack lines into one or more Discord messages under `limit` chars each."""
+    """Pack lines into Discord messages under `limit` chars each.
+
+    When `footer` is set, every page reserves space for it so the last page
+    can append the footer without dropping lines or spinning on rsplit.
+    """
+    # Reserve "\n" + footer on every page so the last page can append safely.
+    footer_room = (1 + len(footer)) if footer else 0
+    body_limit = max(1, limit - footer_room)
     chunks: list[str] = []
-    # Reserve room for footer on the last chunk; earlier chunks omit it.
-    body_limit = limit
     current = header
     for line in lines:
         candidate = f"{current}\n{line}" if current else line
@@ -58,7 +63,6 @@ def chunk_discord_lines(
             continue
         if current:
             chunks.append(current)
-        # Single line longer than the limit — hard clip.
         current = clip_discord(line, body_limit) if len(line) > body_limit else line
     if current:
         chunks.append(current)
@@ -66,18 +70,16 @@ def chunk_discord_lines(
         chunks = [header or "_(empty)_"]
     if footer:
         last = chunks[-1]
-        joined = f"{last}\n{footer}"
-        if len(joined) <= limit:
-            chunks[-1] = joined
-        else:
-            # Drop overflow lines from the last chunk until footer fits.
-            kept = last
-            while kept and len(f"{kept}\n{footer}") > limit:
-                kept = kept.rsplit("\n", 1)[0]
-            chunks[-1] = (
-                f"{kept}\n{footer}" if kept else clip_discord(footer, limit)
-            )
+        joined = f"{last}\n{footer}" if last else footer
+        chunks[-1] = clip_discord(joined, limit)
     return [clip_discord(c, limit) for c in chunks]
+
+
+def display_project_alias(alias: str | None) -> str | None:
+    """Hide internal resolve aliases from Discord chrome."""
+    if not alias or alias.startswith("_"):
+        return None
+    return alias
 
 
 class AgentCog(commands.Cog):
@@ -199,11 +201,10 @@ class AgentCog(commands.Cog):
             return
         # Compact labels only — full URLs blow past Discord's 2000-char content cap.
         lines = [f"• `{short_repo_label(u)}`" for u in urls]
-        footer = "\n`@Clippy …` or `/ask` to start."
         pages = chunk_discord_lines(
             f"**{len(urls)} Cursor-connected repo(s)**",
             lines,
-            footer=footer,
+            footer="`@Clippy …` or `/ask` to start.",
         )
         for page in pages:
             await interaction.followup.send(page, ephemeral=True)
@@ -593,7 +594,7 @@ class AgentCog(commands.Cog):
         embed = build_starter_embed(
             agent_id="pending",
             prompt=prompt,
-            project=project.alias if project.alias != "_explicit" else None,
+            project=display_project_alias(project.alias),
             repo=project.repo,
             status="starting",
         )
@@ -627,7 +628,7 @@ class AgentCog(commands.Cog):
             embed=build_starter_embed(
                 agent_id="pending",
                 prompt=prompt,
-                project=project.alias if project.alias != "_explicit" else None,
+                project=display_project_alias(project.alias),
                 repo=project.repo,
                 status="starting",
             ),
@@ -679,7 +680,7 @@ class AgentCog(commands.Cog):
             embed = build_starter_embed(
                 agent_id=agent_id,
                 prompt=prompt,
-                project=project.alias if project.alias != "_explicit" else None,
+                project=display_project_alias(project.alias),
                 repo=project.repo,
                 status=state,
                 run_id=data.get("run_id"),
@@ -719,7 +720,7 @@ class AgentCog(commands.Cog):
         embed = build_starter_embed(
             agent_id=outcome.agent_id,
             prompt=prompt,
-            project=project.alias if project.alias != "_explicit" else None,
+            project=display_project_alias(project.alias),
             repo=project.repo,
             status=outcome.status,
             summary=outcome.result_text or outcome.error_message,

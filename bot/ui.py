@@ -51,7 +51,7 @@ class RepoPickerView(discord.ui.View):
         self.branch = branch
         self.on_picked = on_picked
         self.owner_id = owner_id
-        self.channel = channel if isinstance(channel, discord.TextChannel) else None
+        self.channel = _topic_channel(channel)
         self._urls = [u.rstrip("/") for u in repo_urls[:25]]
 
         options: list[discord.SelectOption] = []
@@ -96,6 +96,8 @@ class RepoPickerView(discord.ui.View):
             )
             return
 
+        # Ack first — topic edit can exceed Discord's 3s interaction window.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await self._maybe_pin(url)
 
         project = Project(
@@ -104,7 +106,6 @@ class RepoPickerView(discord.ui.View):
             branch=(self.branch or "main").strip() or "main",
             model=self.bot.settings.cursor_model,
         )
-        await interaction.response.defer(ephemeral=True, thinking=True)
         self.stop()
         await self.on_picked(interaction, project)
 
@@ -119,6 +120,19 @@ class RepoPickerView(discord.ui.View):
             await channel.edit(topic=set_channel_repo_topic(channel.topic, repo_url))
         except discord.HTTPException:
             logger.warning("silent channel repo pin failed", exc_info=True)
+
+
+def _topic_channel(
+    channel: discord.abc.Messageable | None,
+) -> discord.TextChannel | None:
+    """Channel whose topic we pin — parent text channel when started from a thread."""
+    if isinstance(channel, discord.TextChannel):
+        return channel
+    if isinstance(channel, discord.Thread) and isinstance(
+        channel.parent, discord.TextChannel
+    ):
+        return channel.parent
+    return None
 
 
 class AgentControls(discord.ui.View):

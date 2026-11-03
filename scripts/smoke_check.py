@@ -11,15 +11,20 @@ sys.path.insert(0, str(ROOT))
 
 from bot.agent_ref import (  # noqa: E402
     build_starter_embed,
+    chat_done,
     is_agent_id,
     parse_agent_ref_from_embed,
+    parse_ref_spoiler,
 )
+from bot.commands import chunk_discord_lines, display_project_alias  # noqa: E402
 from bot.policy import Policy  # noqa: E402
 from bot.config import Settings  # noqa: E402
 from bot.projects import (  # noqa: E402
     load_registry,
     parse_channel_project,
+    parse_channel_repo,
     set_channel_project_topic,
+    set_channel_repo_topic,
 )
 
 
@@ -60,26 +65,72 @@ def test_channel_bind() -> None:
     assert "cursor-project:website" in topic
     topic2 = set_channel_project_topic(topic, "instinct")
     assert parse_channel_project(topic2) == "instinct"
+
+    repo_topic = set_channel_repo_topic("standup", "https://github.com/acme/widgets")
+    assert repo_topic == "standup cursor-repo:acme/widgets"
+    assert parse_channel_repo(repo_topic) == "https://github.com/acme/widgets"
+    reg = load_registry(projects_json='{"projects":{}}')
+    pinned = reg.resolve(channel_topic=repo_topic)
+    assert pinned is not None and pinned.alias == "_channel"
+    assert pinned.repo.endswith("/acme/widgets")
+    assert display_project_alias("_channel") is None
+    assert display_project_alias("instinct") == "instinct"
     print("ok channel_bind")
 
 
 def test_agent_embed() -> None:
-    assert is_agent_id("bc-00000000-0000-0000-0000-000000000001")
+    agent_id = "bc-00000000-0000-0000-0000-000000000001"
+    assert is_agent_id(agent_id)
     assert not is_agent_id("agent-local")
+
+    done = chat_done(
+        agent_id=agent_id,
+        status="finished",
+        summary="fixed auth",
+        run_id="run-1",
+        pr_url="https://github.com/you/Instinct-2.0/pull/1",
+    )
+    spoiler = parse_ref_spoiler(done)
+    assert spoiler is not None
+    assert spoiler.agent_id == agent_id
+    assert spoiler.run_id == "run-1"
+    assert "fixed auth" in done
+    assert "||cursor-agent:" in done
+
     embed = build_starter_embed(
-        agent_id="bc-00000000-0000-0000-0000-000000000001",
+        agent_id=agent_id,
         prompt="fix auth",
         project="instinct",
         repo="https://github.com/you/Instinct-2.0",
         status="running",
         run_id="run-1",
+        summary="still going",
     )
     ref = parse_agent_ref_from_embed(embed)
     assert ref is not None
-    assert ref.agent_id.startswith("bc-")
-    assert ref.project == "instinct"
-    assert embed.title  # human status title
+    assert ref.agent_id == agent_id
+    assert ref.run_id == "run-1"
+    assert embed.footer and embed.footer.text.startswith("cursor-agent:")
     print("ok agent_embed")
+
+
+def test_chunk_footer() -> None:
+    lines = [f"• `owner/repo-{i:04d}`" for i in range(80)]
+    pages = chunk_discord_lines(
+        "**80 repos**",
+        lines,
+        footer="use /ask",
+        limit=500,
+    )
+    assert pages
+    assert all(len(p) <= 500 for p in pages)
+    assert pages[-1].endswith("use /ask")
+    # No silent drops: every repo label appears across pages (footer only on last).
+    bodies = pages[:-1] + [pages[-1][: -len("\nuse /ask")]]
+    joined = "\n".join(bodies)
+    for line in lines:
+        assert line in joined, line
+    print("ok chunk_footer")
 
 
 def test_policy() -> None:
@@ -150,6 +201,7 @@ def main() -> None:
     test_projects_yaml_file()
     test_channel_bind()
     test_agent_embed()
+    test_chunk_footer()
     test_policy()
     test_repo_refs()
     print("ALL SMOKE CHECKS PASSED")
