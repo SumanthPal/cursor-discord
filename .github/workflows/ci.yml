@@ -20,3 +20,6 @@ jobs:
 
       - name: Smoke checks
         run: python scripts/smoke_check.py
+
+      - name: Multimodal verification
+        run: python scripts/verify_multimodal.py
