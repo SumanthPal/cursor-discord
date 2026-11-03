@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot.agent_ref import is_agent_id
-from bot.projects import Project
+from bot.projects import Project, parse_channel_repo, set_channel_repo_topic
 from bot.repo_refs import DISCORD_VALUE_MAX, repo_path
 
 if TYPE_CHECKING:
@@ -15,6 +15,77 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 OnRepoPicked = Callable[[discord.Interaction, Project], Awaitable[None]]
+
+
+class RememberRepoView(discord.ui.View):
+    """One-click channel default: writes `cursor-repo:…` into the topic."""
+
+    def __init__(
+        self,
+        bot: CursorDiscordBot,
+        *,
+        repo_url: str,
+        channel: discord.TextChannel,
+        owner_id: int,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.repo_url = repo_url.rstrip("/")
+        self.channel = channel
+        self.owner_id = owner_id
+        label = short_repo_label(self.repo_url)
+        btn = discord.ui.Button(
+            label=f"Remember {label}"[:80],
+            style=discord.ButtonStyle.primary,
+        )
+        btn.callback = self._remember  # type: ignore[method-assign]
+        self.add_item(btn)
+
+    async def _remember(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the person who started this can set the channel default.",
+                ephemeral=True,
+            )
+            return
+        denied = self.bot.policy.authorize(
+            user=interaction.user, guild=interaction.guild, consume_rate=False
+        )
+        if denied:
+            await interaction.response.send_message(denied, ephemeral=True)
+            return
+        if not self.channel.permissions_for(self.channel.guild.me).manage_channels:
+            await interaction.response.send_message(
+                "I need **Manage Channels** to update the topic "
+                f"(or set `cursor-repo:{short_repo_label(self.repo_url)}` yourself).",
+                ephemeral=True,
+            )
+            return
+        new_topic = set_channel_repo_topic(self.channel.topic, self.repo_url)
+        try:
+            await self.channel.edit(topic=new_topic)
+        except discord.HTTPException as exc:
+            await interaction.response.send_message(
+                f"Could not update topic: {exc}", ephemeral=True
+            )
+            return
+        self.stop()
+        await interaction.response.edit_message(
+            content=(
+                f"Remembered `{short_repo_label(self.repo_url)}` for "
+                f"#{self.channel.name}. `@Clippy …` / `/ask` here skip the picker."
+            ),
+            view=None,
+        )
+
+
+def should_offer_remember(channel: discord.abc.Messageable, repo_url: str) -> bool:
+    if not isinstance(channel, discord.TextChannel):
+        return False
+    current = parse_channel_repo(channel.topic)
+    if not current:
+        return True
+    return current.rstrip("/") != repo_url.rstrip("/")
 
 
 def short_repo_label(url: str) -> str:

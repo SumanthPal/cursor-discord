@@ -2,16 +2,17 @@
 
 Discord command plane for [Cursor cloud agents](https://cursor.com/docs/cloud-agent/api/endpoints).
 
-## Commands
+## How to use (Clippy)
 
-| Command | Purpose |
+| Action | Purpose |
 |---|---|
-| `/agent prompt:…` | Create cloud agent — **pick a Cursor-connected repo** in chat (or `repo:` autocomplete) |
-| `/repos` | List repos linked to the Cursor API key |
-| Thread reply | Follow-up on that agent |
-| `/talk agent_id: prompt:` | Follow-up any `bc-…` agent |
-| `/status` `/cancel` | Status / cancel |
-| `/project list` `/project bind` | Optional nickname aliases (YAML), not required |
+| `@Clippy <prompt>` or `/ask prompt:…` | Start a cloud agent (repo picker if no channel default) |
+| **Remember …** button | Pin `cursor-repo:owner/repo` on the channel topic — next asks skip the picker |
+| Reply in the agent **thread** | Steer the same cloud agent |
+| Status card buttons | Cancel / Status / Open PR |
+| `/ask` + `repo:` | One-shot override of the channel default |
+| `/repos` | List Cursor-connected GitHub repos |
+| `/talk` `/agent` | Advanced / alias — prefer thread reply and `/ask` |
 
 ## Local
 

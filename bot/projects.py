@@ -11,6 +11,11 @@ import yaml
 CHANNEL_PROJECT_RE = re.compile(
     r"(?:^|\s)cursor-project:([A-Za-z0-9_./-]+)(?:\s|$)", re.IGNORECASE
 )
+# Direct repo bind — preferred over YAML aliases for channel defaults.
+# Accepts owner/repo or a full https://github.com/owner/repo URL (no spaces).
+CHANNEL_REPO_RE = re.compile(
+    r"(?:^|\s)cursor-repo:(\S+)(?:\s|$)", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -41,23 +46,49 @@ class ProjectRegistry:
         channel_topic: str | None = None,
         default_model: str | None = None,
     ) -> Project | None:
-        """Resolution: slash repo/project → channel bind → registry default."""
+        """Resolution order:
+
+        1. Explicit repo (slash / picker)
+        2. Explicit project alias (slash / YAML nicknames)
+        3. Channel topic `cursor-repo:…`
+        4. Channel topic `cursor-project:…` (YAML nickname)
+        5. Registry default alias
+        """
+        branch_s = (branch or "main").strip() or "main"
+
         if repo and repo.strip():
-            url = normalize_repo(repo.strip())
             return Project(
                 alias="_explicit",
-                repo=url,
-                branch=(branch or "main").strip() or "main",
+                repo=normalize_repo(repo.strip()),
+                branch=branch_s,
                 model=default_model,
             )
 
         alias = (project or "").strip().lower() or None
-        if not alias and channel_topic:
+        if alias:
+            found = self.get(alias)
+            if not found:
+                return None
+            return Project(
+                alias=found.alias,
+                repo=found.repo,
+                branch=(branch or found.branch).strip() or found.branch,
+                model=found.model or default_model,
+            )
+
+        if channel_topic:
+            channel_repo = parse_channel_repo(channel_topic)
+            if channel_repo:
+                return Project(
+                    alias="_channel",
+                    repo=channel_repo,
+                    branch=branch_s,
+                    model=default_model,
+                )
             alias = parse_channel_project(channel_topic)
 
         if not alias:
             alias = self.default
-
         if not alias:
             return None
 
@@ -91,12 +122,39 @@ def parse_channel_project(topic: str | None) -> str | None:
     return match.group(1).lower()
 
 
+def parse_channel_repo(topic: str | None) -> str | None:
+    if not topic:
+        return None
+    match = CHANNEL_REPO_RE.search(topic)
+    if not match:
+        return None
+    return normalize_repo(match.group(1))
+
+
 def set_channel_project_topic(topic: str | None, alias: str) -> str:
     alias = alias.strip().lower()
     marker = f"cursor-project:{alias}"
     base = topic or ""
     if CHANNEL_PROJECT_RE.search(base):
         return CHANNEL_PROJECT_RE.sub(f" cursor-project:{alias} ", base).strip()
+    if not base.strip():
+        return marker
+    return f"{base.rstrip()} {marker}"
+
+
+def set_channel_repo_topic(topic: str | None, repo: str) -> str:
+    """Upsert `cursor-repo:owner/repo` (compact) into a channel topic."""
+    url = normalize_repo(repo)
+    # Prefer compact owner/repo in the topic for readability.
+    compact = url
+    if compact.startswith("https://github.com/"):
+        compact = compact.removeprefix("https://github.com/")
+    elif compact.startswith("http://github.com/"):
+        compact = compact.removeprefix("http://github.com/")
+    marker = f"cursor-repo:{compact}"
+    base = topic or ""
+    if CHANNEL_REPO_RE.search(base):
+        return CHANNEL_REPO_RE.sub(f" {marker} ", base).strip()
     if not base.strip():
         return marker
     return f"{base.rstrip()} {marker}"
