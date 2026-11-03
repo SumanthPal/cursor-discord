@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+CHANNEL_PROJECT_RE = re.compile(
+    r"(?:^|\s)cursor-project:([A-Za-z0-9_./-]+)(?:\s|$)", re.IGNORECASE
+)
+
+
+@dataclass(frozen=True)
+class Project:
+    alias: str
+    repo: str
+    branch: str
+    model: str | None = None
+
+
+@dataclass
+class ProjectRegistry:
+    projects: dict[str, Project]
+    default: str | None = None
+
+    def get(self, alias: str) -> Project | None:
+        return self.projects.get(alias.lower())
+
+    def aliases(self) -> list[str]:
+        return sorted(self.projects)
+
+    def resolve(
+        self,
+        *,
+        project: str | None = None,
+        repo: str | None = None,
+        branch: str | None = None,
+        channel_topic: str | None = None,
+        default_model: str | None = None,
+    ) -> Project | None:
+        """Resolution: slash repo/project → channel bind → registry default."""
+        if repo and repo.strip():
+            url = normalize_repo(repo.strip())
+            return Project(
+                alias="_explicit",
+                repo=url,
+                branch=(branch or "main").strip() or "main",
+                model=default_model,
+            )
+
+        alias = (project or "").strip().lower() or None
+        if not alias and channel_topic:
+            alias = parse_channel_project(channel_topic)
+
+        if not alias:
+            alias = self.default
+
+        if not alias:
+            return None
+
+        found = self.get(alias)
+        if not found:
+            return None
+
+        return Project(
+            alias=found.alias,
+            repo=found.repo,
+            branch=(branch or found.branch).strip() or found.branch,
+            model=found.model or default_model,
+        )
+
+
+def normalize_repo(value: str) -> str:
+    value = value.strip()
+    if value.startswith("http://") or value.startswith("https://"):
+        return value.rstrip("/")
+    if value.count("/") == 1 and " " not in value:
+        return f"https://github.com/{value}"
+    return value.rstrip("/")
+
+
+def parse_channel_project(topic: str | None) -> str | None:
+    if not topic:
+        return None
+    match = CHANNEL_PROJECT_RE.search(topic)
+    if not match:
+        return None
+    return match.group(1).lower()
+
+
+def set_channel_project_topic(topic: str | None, alias: str) -> str:
+    alias = alias.strip().lower()
+    marker = f"cursor-project:{alias}"
+    base = topic or ""
+    if CHANNEL_PROJECT_RE.search(base):
+        return CHANNEL_PROJECT_RE.sub(f" cursor-project:{alias} ", base).strip()
+    if not base.strip():
+        return marker
+    return f"{base.rstrip()} {marker}"
+
+
+def _parse_registry(data: dict[str, Any]) -> ProjectRegistry:
+    raw_projects = data.get("projects") or {}
+    projects: dict[str, Project] = {}
+    for alias, cfg in raw_projects.items():
+        if not isinstance(cfg, dict):
+            continue
+        repo = cfg.get("repo") or cfg.get("url")
+        if not repo:
+            continue
+        projects[alias.lower()] = Project(
+            alias=alias.lower(),
+            repo=normalize_repo(str(repo)),
+            branch=str(cfg.get("branch") or "main"),
+            model=(str(cfg["model"]) if cfg.get("model") else None),
+        )
+    default = data.get("default")
+    default_s = str(default).lower() if default else None
+    if default_s and default_s not in projects:
+        default_s = None
+    return ProjectRegistry(projects=projects, default=default_s)
+
+
+def load_registry(
+    *,
+    projects_json: str | None = None,
+    projects_path: str | Path | None = None,
+) -> ProjectRegistry:
+    if projects_json and projects_json.strip():
+        data = json.loads(projects_json)
+        if not isinstance(data, dict):
+            raise ValueError("PROJECTS_JSON must be a JSON object")
+        return _parse_registry(data)
+
+    path = Path(projects_path or "/app/projects.yaml")
+    if path.is_file():
+        with path.open() as fh:
+            data = yaml.safe_load(fh) or {}
+        if not isinstance(data, dict):
+            raise ValueError(f"{path} must contain a YAML mapping")
+        return _parse_registry(data)
+
+    return ProjectRegistry(projects={}, default=None)
