@@ -42,12 +42,14 @@ class RepoPickerView(discord.ui.View):
         repo_urls: list[str],
         branch: str | None,
         on_picked: OnRepoPicked,
+        owner_id: int,
     ) -> None:
         super().__init__(timeout=300)
         self.bot = bot
         self.prompt = prompt
         self.branch = branch
         self.on_picked = on_picked
+        self.owner_id = owner_id
         # Discord select values max 100 chars — never put the URL in `value`.
         # Index keys map back to the full URL list.
         self._urls = [u.rstrip("/") for u in repo_urls[:25]]
@@ -71,6 +73,19 @@ class RepoPickerView(discord.ui.View):
         self.add_item(select)
 
     async def _picked(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the person who started this can pick a repo.",
+                ephemeral=True,
+            )
+            return
+        denied = self.bot.policy.authorize(
+            user=interaction.user, guild=interaction.guild
+        )
+        if denied:
+            await interaction.response.send_message(denied, ephemeral=True)
+            return
+
         assert isinstance(self.children[0], discord.ui.Select)
         key = self.children[0].values[0]
         try:
@@ -86,6 +101,7 @@ class RepoPickerView(discord.ui.View):
             branch=(self.branch or "main").strip() or "main",
             model=self.bot.settings.cursor_model,
         )
+        # Public defer so followup status card is visible in-channel.
         await interaction.response.defer(ephemeral=False, thinking=True)
         self.stop()
         await self.on_picked(interaction, project)

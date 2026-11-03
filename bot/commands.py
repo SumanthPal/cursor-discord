@@ -458,6 +458,7 @@ class AgentCog(commands.Cog):
             repo_urls=urls,
             branch=branch,
             on_picked=on_picked,
+            owner_id=interaction.user.id,
         )
         await interaction.response.send_message(
             f"Pick a repo for: **{_truncate_prompt(prompt)}**",
@@ -500,6 +501,7 @@ class AgentCog(commands.Cog):
             repo_urls=urls,
             branch=None,
             on_picked=on_picked,
+            owner_id=message.author.id,
         )
         await message.reply(
             f"Pick a repo for: **{_truncate_prompt(prompt)}**",
@@ -550,12 +552,12 @@ class AgentCog(commands.Cog):
             repo=project.repo,
             status="starting",
         )
-        # Prefer channel send so ephemeral pickers still post a public status card.
-        if isinstance(channel, discord.TextChannel):
-            placeholder = await channel.send(embed=embed)
-        elif isinstance(channel, discord.Thread):
-            placeholder = await channel.send(embed=embed)
+        # Must follow up (or edit) a deferred interaction — otherwise Discord
+        # leaves a stuck/failed "thinking" indicator beside the real card.
+        if interaction.response.is_done():
+            placeholder = await interaction.followup.send(embed=embed)
         else:
+            await interaction.response.defer(ephemeral=False, thinking=True)
             placeholder = await interaction.followup.send(embed=embed)
         thread = await self._ensure_thread(channel, placeholder, prompt)
         await thread.send(
