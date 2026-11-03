@@ -10,10 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from bot.agent_ref import (  # noqa: E402
-    build_starter_embed,
     chat_done,
+    chat_progress,
+    chat_working,
     is_agent_id,
-    parse_agent_ref_from_embed,
     parse_ref_spoiler,
 )
 from bot.commands import chunk_discord_lines, display_project_alias  # noqa: E402
@@ -78,7 +78,7 @@ def test_channel_bind() -> None:
     print("ok channel_bind")
 
 
-def test_agent_embed() -> None:
+def test_agent_chat() -> None:
     agent_id = "bc-00000000-0000-0000-0000-000000000001"
     assert is_agent_id(agent_id)
     assert not is_agent_id("agent-local")
@@ -95,23 +95,14 @@ def test_agent_embed() -> None:
     assert spoiler.agent_id == agent_id
     assert spoiler.run_id == "run-1"
     assert "fixed auth" in done
+    assert "your turn" in done.lower()
     assert "||cursor-agent:" in done
 
-    embed = build_starter_embed(
-        agent_id=agent_id,
-        prompt="fix auth",
-        project="instinct",
-        repo="https://github.com/you/Instinct-2.0",
-        status="running",
-        run_id="run-1",
-        summary="still going",
-    )
-    ref = parse_agent_ref_from_embed(embed)
-    assert ref is not None
-    assert ref.agent_id == agent_id
-    assert ref.run_id == "run-1"
-    assert embed.footer and embed.footer.text.startswith("cursor-agent:")
-    print("ok agent_embed")
+    working = chat_working(repo="https://github.com/you/Instinct-2.0")
+    assert "on it" in working.lower()
+    progress = chat_progress(snippet="editing auth.ts", agent_id=agent_id)
+    assert "still working" in progress.lower()
+    print("ok agent_chat")
 
 
 def test_chunk_footer() -> None:
@@ -200,7 +191,7 @@ def main() -> None:
     test_projects_json()
     test_projects_yaml_file()
     test_channel_bind()
-    test_agent_embed()
+    test_agent_chat()
     test_chunk_footer()
     test_policy()
     test_repo_refs()

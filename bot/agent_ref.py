@@ -69,14 +69,28 @@ def _repo_label(repo: str) -> str:
     return repo_path(repo) or repo
 
 
-def chat_working(*, repo: str | None = None) -> str:
+def chat_working(*, repo: str | None = None, agent_id: str | None = None) -> str:
     if repo and repo != "(existing agent)":
-        return f"on it — `{_repo_label(repo)}`"
-    return "on it…"
+        line = f"on it — spinning up in the cloud for `{_repo_label(repo)}`…"
+    else:
+        line = "on it — working in the cloud…"
+    trailer = ref_spoiler(agent_id) if agent_id else ""
+    return _truncate(f"{line}\n{trailer}".strip() if trailer else line, 2000)
 
 
-def chat_progress(snippet: str) -> str:
-    return _truncate(snippet, 1900)
+def chat_progress(
+    *,
+    snippet: str | None = None,
+    agent_id: str | None = None,
+    run_id: str | None = None,
+) -> str:
+    body = (snippet or "").strip()
+    if body:
+        line = f"still working…\n_{_truncate(body, 400)}_"
+    else:
+        line = "still working… (clone / setup can take a minute)"
+    trailer = ref_spoiler(agent_id, run_id) if agent_id else ""
+    return _truncate(f"{line}\n{trailer}".strip() if trailer else line, 2000)
 
 
 def chat_done(
@@ -95,28 +109,30 @@ def chat_done(
     if key in {"error"}:
         head = f"hit a snag{': ' + body if body else '.'}"
         body = ""
+        cue = "retry with `/ask` or another reply."
     elif key in {"cancelled", "canceled"}:
         head = "cancelled."
         body = ""
+        cue = "say what you want next, or `/ask` for a fresh agent."
     elif body:
-        head = ""
+        head = "done."
+        cue = "**your turn** — reply in this thread to steer (no @ needed)."
     else:
         head = "done."
+        body = ""
+        cue = "**your turn** — reply in this thread to steer (no @ needed)."
 
-    parts: list[str] = []
-    if head:
-        parts.append(head)
+    parts: list[str] = [head]
     if body:
-        parts.append(_truncate(body, 1800))
+        parts.append(_truncate(body, 1600))
     if pr_url:
         parts.append(pr_url)
+    parts.append(cue)
 
     trailer = ref_spoiler(agent_id, run_id)
-    # Keep repo on first anchor only if we never got a real agent id yet — skip when done.
     if trailer:
         parts.append(trailer)
     elif repo and repo != "(existing agent)":
-        # pending / failed before id — still useful context
         parts.append(f"`{_repo_label(repo)}`")
 
     text = "\n".join(p for p in parts if p)

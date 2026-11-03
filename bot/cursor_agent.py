@@ -51,9 +51,11 @@ class CursorAgentService:
     async def start(self) -> None:
         Path(self.bridge_workspace).mkdir(parents=True, exist_ok=True)
         # Keep a long-lived bridge for the Discord process lifetime.
+        # Env fallback OK: ensure_api_key_env() sets CURSOR_API_KEY for this process.
+        # Needed for CancelRun / some bridge RPCs that don't take api_key kwargs.
         self._client = await AsyncClient.launch_bridge(
             workspace=self.bridge_workspace,
-            allow_api_key_env_fallback=False,
+            allow_api_key_env_fallback=True,
         )
         logger.info("cursor-sdk AsyncClient bridge ready")
 
