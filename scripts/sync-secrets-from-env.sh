@@ -21,7 +21,15 @@ set -a
 while IFS= read -r line || [[ -n "${line}" ]]; do
   [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
   if [[ "${line}" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
-    export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+    key="${BASH_REMATCH[1]}"
+    val="${BASH_REMATCH[2]}"
+    # Match python-dotenv: strip one layer of matching quotes.
+    if [[ "${val}" =~ ^\"(.*)\"$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    elif [[ "${val}" =~ ^\'(.*)\'$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    fi
+    export "${key}=${val}"
   fi
 done < "${ENV_FILE}"
 set +a
