@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 # Discord message content hard limit (embeds use a higher cap).
 DISCORD_CONTENT_MAX = 2000
 
-HELP_TEXT = """**Clippy**
-• `@Clippy …` or `/ask` to start
+HELP_TEXT = """**Cursor**
+• `@Cursor …` or `/ask` to start
 • First repo pick pins the channel (`cursor-repo:…` in topic)
 • Reply in the thread to steer · Cancel / Open PR on the card
 """
@@ -96,7 +96,7 @@ class AgentCog(commands.Cog):
         else:
             await interaction.response.send_message(msg, ephemeral=True)
 
-    @app_commands.command(name="help", description="How to use Clippy")
+    @app_commands.command(name="help", description="How to use Cursor")
     async def help_cmd(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(HELP_TEXT, ephemeral=True)
 
@@ -204,7 +204,7 @@ class AgentCog(commands.Cog):
         pages = chunk_discord_lines(
             f"**{len(urls)} Cursor-connected repo(s)**",
             lines,
-            footer="`@Clippy …` or `/ask` to start.",
+            footer="`@Cursor …` or `/ask` to start.",
         )
         for page in pages:
             await interaction.followup.send(page, ephemeral=True)
@@ -346,7 +346,7 @@ class AgentCog(commands.Cog):
         aliases = self.bot.registry.aliases()
         if not aliases:
             await interaction.response.send_message(
-                "No nicknames. Use `@Clippy` / `/ask` — first pick pins the channel.",
+                "No nicknames. Use `@Cursor` / `/ask` — first pick pins the channel.",
                 ephemeral=True,
             )
             return
@@ -439,7 +439,7 @@ class AgentCog(commands.Cog):
         prompt = _strip_mention(message.content, self.bot.user)
         if not prompt:
             await message.reply(
-                "`@Clippy <what to do>` or `/ask`",
+                "`@Cursor <what to do>` or `/ask`",
                 mention_author=False,
             )
             return
