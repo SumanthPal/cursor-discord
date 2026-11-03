@@ -68,6 +68,14 @@ class CursorDiscordBot(commands.Bot):
 
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (%s)", self.user, self.user and self.user.id)
+        if not self.intents.message_content:
+            logger.error(
+                "Message Content Intent is OFF on the gateway — @mentions will not work. "
+                "Enable it in Discord Developer Portal → Bot → Privileged Gateway Intents, "
+                "then restart the service."
+            )
+        else:
+            logger.info("Message Content Intent enabled on gateway")
 
     async def _start_health_server(self) -> None:
         app = web.Application()

@@ -410,44 +410,70 @@ class AgentCog(commands.Cog):
         if self.bot.user is None:
             return
 
-        # Thread follow-ups to an existing agent
+        # Thread follow-ups to an existing agent (any non-empty reply)
         if isinstance(message.channel, discord.Thread):
             ref = await find_agent_ref_in_channel(
                 message.channel, bot_user_id=self.bot.user.id
             )
             if ref and not _is_bot_mention_only(message, self.bot.user):
-                # Ignore slash-induced empties; require non-empty text
                 prompt = message.content.strip()
                 if prompt and not message.content.startswith("/"):
-                    denied = self.bot.policy.authorize(
-                        user=message.author, guild=message.guild
-                    )
-                    if denied:
-                        await message.reply(denied, mention_author=False)
+                    # Prefer starting a new agent when they clearly @Clippy.
+                    if not _message_addresses_bot(message, self.bot.user):
+                        denied = self.bot.policy.authorize(
+                            user=message.author, guild=message.guild
+                        )
+                        if denied:
+                            await message.reply(denied, mention_author=False)
+                            return
+                        await self._follow_up_message(
+                            message=message,
+                            agent_id=ref.agent_id,
+                            prompt=prompt,
+                            repo=ref.repo or "(existing agent)",
+                            project_alias=ref.project,
+                        )
                         return
-                    await self._follow_up_message(
-                        message=message,
-                        agent_id=ref.agent_id,
-                        prompt=prompt,
-                        repo=ref.repo or "(existing agent)",
-                        project_alias=ref.project,
-                    )
-                    return
 
-        if self.bot.user not in message.mentions:
+        if not _message_addresses_bot(message, self.bot.user):
             return
-        prompt = _strip_mention(message.content, self.bot.user)
+
+        # Ping with empty body ⇒ Message Content Intent usually off in the portal
+        # (slash commands still work — they don't need that intent).
+        if not (message.content or "").strip() and self.bot.user in message.mentions:
+            try:
+                await message.reply(
+                    "I saw the ping but no message text. Enable **Message Content "
+                    "Intent** (Developer Portal → Bot → Privileged Gateway Intents), "
+                    "save, then `@Clippy …` again. `/ask` keeps working either way.",
+                    mention_author=False,
+                )
+            except discord.HTTPException:
+                logger.warning("could not warn about message content intent", exc_info=True)
+            return
+
+        prompt = _strip_bot_address(message.content, self.bot.user)
         if not prompt:
-            await message.reply(
-                "`@Clippy <what to do>` or `/ask`",
-                mention_author=False,
-            )
+            try:
+                await message.reply(
+                    "`@Clippy <what to do>` or `/ask`",
+                    mention_author=False,
+                )
+            except discord.HTTPException:
+                logger.warning("could not reply to empty @Clippy", exc_info=True)
             return
 
         denied = self.bot.policy.authorize(user=message.author, guild=message.guild)
         if denied:
             await message.reply(denied, mention_author=False)
             return
+
+        logger.info(
+            "@Clippy from %s in #%s: %s",
+            message.author.id,
+            getattr(message.channel, "name", message.channel.id),
+            _truncate_prompt(prompt),
+        )
 
         resolved = self._resolve_project(
             project=None,
@@ -870,15 +896,42 @@ class AgentCog(commands.Cog):
             pass
 
 
-def _strip_mention(content: str, bot_user: discord.ClientUser) -> str:
-    text = content
+def _message_addresses_bot(
+    message: discord.Message, bot_user: discord.ClientUser
+) -> bool:
+    """True for a real ping or a soft `@Clippy …` / `Clippy, …` address."""
+    if bot_user in message.mentions:
+        return True
+    content = message.content or ""
+    if f"<@{bot_user.id}>" in content or f"<@!{bot_user.id}>" in content:
+        return True
+    # Soft address when someone types the name without picking the mention chip.
+    name = (bot_user.display_name or bot_user.name or "clippy").lower()
+    lowered = content.lstrip().lower()
+    return lowered.startswith(f"@{name}") or lowered.startswith(f"{name} ")
+
+
+def _strip_bot_address(content: str, bot_user: discord.ClientUser) -> str:
+    text = content or ""
     for form in (f"<@{bot_user.id}>", f"<@!{bot_user.id}>"):
         text = text.replace(form, "")
-    return text.strip()
+    name = (bot_user.display_name or bot_user.name or "Clippy").strip()
+    # Strip leading @Name / Name,
+    lowered = text.lstrip()
+    for prefix in (f"@{name}", name):
+        if lowered.lower().startswith(prefix.lower()):
+            lowered = lowered[len(prefix) :]
+            break
+    return lowered.lstrip(" ,:").strip()
+
+
+def _strip_mention(content: str, bot_user: discord.ClientUser) -> str:
+    # Back-compat alias
+    return _strip_bot_address(content, bot_user)
 
 
 def _is_bot_mention_only(message: discord.Message, bot_user: discord.ClientUser) -> bool:
-    return not _strip_mention(message.content, bot_user)
+    return not _strip_bot_address(message.content, bot_user)
 
 
 def _thread_name(prompt: str) -> str:
