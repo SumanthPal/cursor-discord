@@ -129,6 +129,17 @@ class CursorAgentService:
                 if hasattr(result, "__await__"):
                     await result  # type: ignore[misc]
 
+    async def list_repos(self) -> list[str]:
+        """URLs Cursor can clone for this API key (GitHub-connected account)."""
+        items = await self.client.list_repositories(api_key=self.api_key)
+        urls: list[str] = []
+        for item in items:
+            url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+            if url:
+                urls.append(str(url).rstrip("/"))
+        # Stable, de-duped
+        return sorted(set(urls))
+
     async def status(self, agent_id: str) -> dict[str, Any]:
         info = await self.client.get_agent(agent_id, api_key=self.api_key)
         active = self._active_runs.get(agent_id)
