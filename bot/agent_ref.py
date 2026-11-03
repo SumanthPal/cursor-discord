@@ -184,21 +184,7 @@ def parse_agent_ref_from_embed(embed: discord.Embed) -> AgentRef | None:
 async def find_agent_ref_in_channel(
     channel: discord.abc.Messageable, *, bot_user_id: int, limit: int = 50
 ) -> AgentRef | None:
-    if isinstance(channel, discord.Thread):
-        try:
-            starter = channel.starter_message
-            if starter is None:
-                starter = await channel.fetch_message(channel.id)
-            ref = parse_agent_ref_from_message(starter, bot_user_id=bot_user_id)
-            if ref:
-                return ref
-        except (discord.NotFound, discord.HTTPException, AttributeError):
-            pass
-
-    async for message in channel.history(limit=limit, oldest_first=True):
-        ref = parse_agent_ref_from_message(message, bot_user_id=bot_user_id)
-        if ref:
-            return ref
+    # Newest first so a later /agent card in the same thread wins over the starter.
     async for message in channel.history(limit=limit, oldest_first=False):
         ref = parse_agent_ref_from_message(message, bot_user_id=bot_user_id)
         if ref:
