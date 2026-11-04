@@ -9,10 +9,10 @@ from bot.repo_refs import repo_path
 
 FOOTER_PREFIX = "cursor-agent:"
 AGENT_ID_RE = re.compile(r"^bc-[A-Za-z0-9-]+$")
-# Spoiler-hidden machine trailer: ||cursor-agent:bc-… · run:…||
-_REF_SPOILER_RE = re.compile(
-    rf"\|\|{re.escape(FOOTER_PREFIX)}(bc-[A-Za-z0-9-]+)"
-    r"(?: · run:([A-Za-z0-9_-]+))?\|\|"
+# Spoiler (legacy) or Discord subtext trailer carrying the bc- id.
+_REF_TRAILER_RE = re.compile(
+    rf"(?:\|\||-#\s+)?(?:{re.escape(FOOTER_PREFIX)})?`?(bc-[A-Za-z0-9-]+)`?"
+    r"(?: · (?:run:)?`?([A-Za-z0-9_-]+)`?)?(?:\|\|)?"
 )
 
 
@@ -46,20 +46,25 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - 1] + "…"
 
 
-def ref_spoiler(agent_id: str, run_id: str | None = None) -> str:
-    """Hide the bc- id so Discord still carries state without bot chrome."""
+def ref_trailer(agent_id: str, run_id: str | None = None) -> str:
+    """Small always-visible Discord subtext carrying the bc- id."""
     if not is_agent_id(agent_id):
         return ""
-    core = f"{FOOTER_PREFIX}{agent_id}"
+    bit = f"`{agent_id}`"
     if run_id:
-        core = f"{core} · run:{run_id}"
-    return f"||{core}||"
+        bit = f"{bit} · `{run_id}`"
+    return f"-# {bit}"
+
+
+def ref_spoiler(agent_id: str, run_id: str | None = None) -> str:
+    """Back-compat alias — prefer visible subtext over hover spoilers."""
+    return ref_trailer(agent_id, run_id)
 
 
 def parse_ref_spoiler(content: str | None) -> AgentRef | None:
     if not content:
         return None
-    match = _REF_SPOILER_RE.search(content)
+    match = _REF_TRAILER_RE.search(content)
     if not match:
         return None
     return AgentRef(agent_id=match.group(1), run_id=match.group(2))
@@ -69,10 +74,17 @@ def _repo_label(repo: str) -> str:
     return repo_path(repo) or repo
 
 
-def chat_working(*, repo: str | None = None) -> str:
+def chat_working(*, repo: str | None = None, status: str | None = None) -> str:
+    key = (status or "").lower()
+    if key in {"starting", "created"}:
+        verb = "starting"
+    elif key in {"running", "streaming"}:
+        verb = "working"
+    else:
+        verb = "working"
     if repo and repo != "(existing agent)":
-        return f"on it — `{_repo_label(repo)}`"
-    return "on it…"
+        return f"{verb} · `{_repo_label(repo)}`"
+    return f"{verb}…"
 
 
 def chat_progress(snippet: str) -> str:
@@ -88,7 +100,7 @@ def chat_done(
     pr_url: str | None = None,
     repo: str | None = None,
 ) -> str:
-    """Final (or error) message — reads like a person, id tucked in a spoiler."""
+    """Final (or live) message — id as small subtext, never hover-only."""
     key = (status or "").lower()
     body = (summary or "").strip()
 
@@ -98,6 +110,8 @@ def chat_done(
     elif key in {"cancelled", "canceled"}:
         head = "cancelled."
         body = ""
+    elif _is_active(key) and not body:
+        head = chat_working(repo=repo, status=key)
     elif body:
         head = ""
     else:
@@ -111,12 +125,10 @@ def chat_done(
     if pr_url:
         parts.append(pr_url)
 
-    trailer = ref_spoiler(agent_id, run_id)
-    # Keep repo on first anchor only if we never got a real agent id yet — skip when done.
+    trailer = ref_trailer(agent_id, run_id)
     if trailer:
         parts.append(trailer)
     elif repo and repo != "(existing agent)":
-        # pending / failed before id — still useful context
         parts.append(f"`{_repo_label(repo)}`")
 
     text = "\n".join(p for p in parts if p)
@@ -156,7 +168,7 @@ def build_starter_embed(
         description=chat_done(
             agent_id=agent_id if is_agent_id(agent_id) else "pending",
             status=status,
-            summary=summary or chat_working(repo=repo),
+            summary=summary or chat_working(repo=repo, status=status),
             run_id=run_id,
             pr_url=pr_url,
             repo=repo,

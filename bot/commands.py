@@ -680,23 +680,44 @@ class AgentCog(commands.Cog):
             await interaction.followup.send("Need a text channel or thread.")
             return
 
-        embed = build_starter_embed(
-            agent_id="pending",
-            prompt=agent_prompt.display,
-            project=display_project_alias(project.alias),
-            repo=project.repo,
-            status="starting",
-        )
-        # Acknowledge the interaction (clears Discord's 3s / thinking UI), but
-        # post the status card via channel.send so later edits use the bot
-        # token — interaction webhook tokens expire after ~15 minutes.
+        # Ack first — live status card lives in the thread (not the parent channel)
+        # so PR links / progress never spam the main feed.
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=True)
-        placeholder = await channel.send(embed=embed)
-        await _clear_deferred_thinking(interaction, placeholder)
-        thread = await self._ensure_thread(channel, placeholder, agent_prompt.display)
+
+        if isinstance(channel, discord.Thread):
+            status_msg = await channel.send(
+                embed=build_starter_embed(
+                    agent_id="pending",
+                    prompt=agent_prompt.display,
+                    project=display_project_alias(project.alias),
+                    repo=project.repo,
+                    status="starting",
+                )
+            )
+            await _clear_deferred_thinking(interaction, status_msg)
+            await self._run_create(
+                status_message=status_msg,
+                thread=channel,
+                agent_prompt=agent_prompt,
+                project=project,
+            )
+            return
+
+        anchor = await channel.send(_thread_anchor_text(agent_prompt.display, project))
+        await _clear_deferred_thinking(interaction, anchor)
+        thread = await self._ensure_thread(channel, anchor, agent_prompt.display)
+        status_msg = await thread.send(
+            embed=build_starter_embed(
+                agent_id="pending",
+                prompt=agent_prompt.display,
+                project=display_project_alias(project.alias),
+                repo=project.repo,
+                status="starting",
+            )
+        )
         await self._run_create(
-            status_message=placeholder,
+            status_message=status_msg,
             thread=thread,
             agent_prompt=agent_prompt,
             project=project,
@@ -713,19 +734,42 @@ class AgentCog(commands.Cog):
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             await message.reply("Need a text channel.", mention_author=False)
             return
-        placeholder = await message.reply(
+
+        if isinstance(channel, discord.Thread):
+            status_msg = await channel.send(
+                embed=build_starter_embed(
+                    agent_id="pending",
+                    prompt=agent_prompt.display,
+                    project=display_project_alias(project.alias),
+                    repo=project.repo,
+                    status="starting",
+                )
+            )
+            await self._run_create(
+                status_message=status_msg,
+                thread=channel,
+                agent_prompt=agent_prompt,
+                project=project,
+            )
+            return
+
+        # Parent channel: short anchor only. Live card + PR stay in the thread.
+        anchor = await message.reply(
+            _thread_anchor_text(agent_prompt.display, project),
+            mention_author=False,
+        )
+        thread = await self._ensure_thread(channel, anchor, agent_prompt.display)
+        status_msg = await thread.send(
             embed=build_starter_embed(
                 agent_id="pending",
                 prompt=agent_prompt.display,
                 project=display_project_alias(project.alias),
                 repo=project.repo,
                 status="starting",
-            ),
-            mention_author=False,
+            )
         )
-        thread = await self._ensure_thread(channel, placeholder, agent_prompt.display)
         await self._run_create(
-            status_message=placeholder,
+            status_message=status_msg,
             thread=thread,
             agent_prompt=agent_prompt,
             project=project,
@@ -828,10 +872,6 @@ class AgentCog(commands.Cog):
         except discord.HTTPException:
             await thread.send(embed=embed, view=view)
 
-        bits = [f"**{outcome.status.title()}.** `{outcome.agent_id}` — reply to continue."]
-        if outcome.pr_url:
-            bits.append(outcome.pr_url)
-        await thread.send(" ".join(bits))
         await self._deliver_artifacts(thread, outcome.agent_id)
 
     async def _deliver_artifacts(
@@ -1000,6 +1040,13 @@ def _thread_name(prompt: str) -> str:
     if len(cleaned) > 80:
         cleaned = cleaned[:77] + "…"
     return cleaned or "cursor-agent"
+
+
+def _thread_anchor_text(prompt: str, project: Project) -> str:
+    """Parent-channel starter: short prompt only — no PR / live status."""
+    label = short_repo_label(project.repo)
+    head = _truncate_prompt(prompt)
+    return clip_discord(f"**{label}** · {head}" if head else f"**{label}**")
 
 
 def _truncate_prompt(prompt: str) -> str:

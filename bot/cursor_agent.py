@@ -233,20 +233,24 @@ class CursorAgentService:
             await on_status("running", {"agent_id": agent_id, "run_id": run_id})
 
         last_text = ""
+        last_snippet = ""
         try:
             async for message in run.stream():
                 text = _assistant_text(message)
                 if text:
                     last_text = text
-                    if on_status and len(last_text) < 500:
-                        await on_status(
-                            "streaming",
-                            {
-                                "agent_id": agent_id,
-                                "run_id": run_id,
-                                "snippet": last_text[-300:],
-                            },
-                        )
+                snippet = _activity_snippet(message)
+                if not snippet or not on_status or snippet == last_snippet:
+                    continue
+                last_snippet = snippet
+                await on_status(
+                    "streaming",
+                    {
+                        "agent_id": agent_id,
+                        "run_id": run_id,
+                        "snippet": snippet,
+                    },
+                )
             result: RunResult = await run.wait()
         except CursorAgentError as err:
             logger.exception("cursor run failed to start: %s", err)
@@ -289,6 +293,70 @@ class CursorAgentService:
             branch=branch,
             error_message=result.error_message,
         )
+
+
+def _activity_snippet(message: Any) -> str:
+    """Human-readable live status from SDK stream messages (tools > tasks > text)."""
+    msg_type = getattr(message, "type", None)
+
+    if msg_type == "tool_call":
+        status = str(getattr(message, "status", "") or "")
+        # Prefer in-flight tools; completed ones flicker too hard for Discord edits.
+        if status == "completed":
+            return ""
+        name = str(getattr(message, "name", "") or "tool").strip() or "tool"
+        detail = _tool_arg_detail(getattr(message, "args", None))
+        label = name.replace("_", " ")
+        return f"`{label}`{detail}"[:300]
+
+    if msg_type == "status":
+        note = str(getattr(message, "message", "") or "").strip()
+        if note:
+            return note[:300]
+        state = str(getattr(message, "status", "") or "").strip()
+        return state[:300] if state else ""
+
+    if msg_type == "task":
+        note = str(getattr(message, "text", "") or "").strip()
+        return note[:300] if note else ""
+
+    if msg_type == "thinking":
+        return "thinking…"
+
+    text = _assistant_text(message)
+    if not text:
+        return ""
+    # Last non-empty line reads better than a mid-stream blob.
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    return lines[-1][-300:]
+
+
+def _tool_arg_detail(args: Any) -> str:
+    if not isinstance(args, dict):
+        return ""
+    for key in (
+        "command",
+        "path",
+        "filePath",
+        "file_path",
+        "target_file",
+        "targetFile",
+        "query",
+        "pattern",
+        "url",
+    ):
+        val = args.get(key)
+        if val is None:
+            continue
+        s = " ".join(str(val).split())
+        if not s:
+            continue
+        if len(s) > 64:
+            s = s[:63] + "…"
+        return f" · `{s}`"
+    return ""
 
 
 def _assistant_text(message: Any) -> str:
