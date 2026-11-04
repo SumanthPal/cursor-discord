@@ -238,13 +238,13 @@ class CursorAgentService:
                 text = _assistant_text(message)
                 if text:
                     last_text = text
-                    if on_status and len(last_text) < 500:
+                    if on_status:
                         await on_status(
                             "streaming",
                             {
                                 "agent_id": agent_id,
                                 "run_id": run_id,
-                                "snippet": last_text[-300:],
+                                "snippet": last_text[-1900:],
                             },
                         )
             result: RunResult = await run.wait()

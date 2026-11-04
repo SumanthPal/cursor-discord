@@ -16,6 +16,10 @@ from bot.agent_ref import (  # noqa: E402
     parse_agent_ref_from_embed,
     parse_ref_spoiler,
 )
+from bot.chat_ui import (  # noqa: E402
+    format_repo_choice_prompt,
+    resolve_repo_from_reply,
+)
 from bot.commands import chunk_discord_lines, display_project_alias  # noqa: E402
 from bot.cloud_artifacts import (  # noqa: E402
     artifact_filename,
@@ -218,6 +222,19 @@ def test_multimodal_prompt() -> None:
     print("ok multimodal_prompt")
 
 
+def test_chat_repo_reply() -> None:
+    urls = [
+        "https://github.com/acme/widgets",
+        "https://github.com/acme/monorepo",
+    ]
+    prompt = format_repo_choice_prompt(urls, task_preview="fix login")
+    assert "1." in prompt and "acme/widgets" in prompt
+    assert resolve_repo_from_reply("2", urls) == urls[1]
+    assert resolve_repo_from_reply("widgets", urls) == urls[0]
+    assert resolve_repo_from_reply("nope", urls) is None
+    print("ok chat_repo_reply")
+
+
 def test_repo_refs() -> None:
     from bot.repo_refs import decode_repo_ref, encode_repo_ref
 
@@ -249,6 +266,7 @@ def main() -> None:
     test_policy()
     test_multimodal_prompt()
     test_cloud_artifacts()
+    test_chat_repo_reply()
     test_repo_refs()
     print("ALL SMOKE CHECKS PASSED")
 

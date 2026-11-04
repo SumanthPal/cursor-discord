@@ -137,7 +137,7 @@ def _topic_channel(
 
 
 class AgentControls(discord.ui.View):
-    """Buttons under agent status embeds. Not LLM — plain Discord UI."""
+    """Legacy cancel/PR buttons — prefer `/cancel` and links in chat replies."""
 
     def __init__(
         self,

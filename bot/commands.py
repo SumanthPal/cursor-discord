@@ -8,15 +8,25 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.agent_ref import (
-    build_starter_embed,
     find_agent_ref_in_channel,
     is_agent_id,
+    ref_spoiler,
+)
+from bot.chat_ui import (
+    ChatStatusEditor,
+    PendingRepoLaunch,
+    chat_ack,
+    chat_failed,
+    chat_status_body,
+    format_repo_choice_prompt,
+    resolve_repo_from_reply,
 )
 from bot.cloud_artifacts import deliver_new_cloud_artifacts
 from bot.multimodal import AgentPrompt, agent_prompt_from_message
-from bot.projects import Project, set_channel_project_topic
+from bot.projects import Project, parse_channel_repo, set_channel_project_topic
+from bot.projects import set_channel_repo_topic as pin_channel_repo
 from bot.repo_refs import decode_repo_ref, encode_repo_ref
-from bot.ui import RepoPickerView, controls_for, short_repo_label
+from bot.ui import short_repo_label
 
 if TYPE_CHECKING:
     from bot.main import CursorDiscordBot
@@ -26,11 +36,12 @@ logger = logging.getLogger(__name__)
 # Discord message content hard limit (embeds use a higher cap).
 DISCORD_CONTENT_MAX = 2000
 
-HELP_TEXT = """**Cursor**
-• `@Cursor …` or `/ask` to start (PNG/JPEG/GIF/WebP on the same message)
-• First repo pick pins the channel (`cursor-repo:…` in topic)
-• Reply in the thread to steer · Cancel / Open PR on the card
-• Demo screenshots/videos from the agent land in the thread when a run finishes (`/artifacts` to retry)
+HELP_TEXT = """**Cursor** — chat with a cloud coding agent
+• `@Cursor …` or `/ask` — say what you want (images on the same message work too)
+• I'll reply in plain text in a thread; keep talking there to steer the run
+• No repo set on the channel yet? I'll ask which one — reply with the number or name
+• `/cancel` stops a run · PR links show up in my reply when one is opened
+• Demo screenshots/videos land in the thread when a run finishes (`/artifacts` to retry)
 """
 
 
@@ -515,6 +526,40 @@ class AgentCog(commands.Cog):
                     )
                     return
 
+        pending_key = (message.channel.id, message.author.id)
+        pending = self.bot.pending_repo_launches.get(pending_key)
+        if pending is not None and isinstance(pending, PendingRepoLaunch):
+            if pending.owner_id != message.author.id:
+                return
+            denied = self.bot.policy.authorize(
+                user=message.author, guild=message.guild
+            )
+            if denied:
+                await message.reply(denied, mention_author=False)
+                return
+            picked = resolve_repo_from_reply(message.content, pending.urls)
+            if not picked:
+                await message.reply(
+                    "I didn't catch that — reply with the **number** from the list "
+                    "or a repo name like `org/repo`.",
+                    mention_author=False,
+                )
+                return
+            del self.bot.pending_repo_launches[pending_key]
+            await self._maybe_pin_channel_repo(message.channel, picked)
+            project = Project(
+                alias="_explicit",
+                repo=picked,
+                branch=(pending.branch or "").strip() or None,
+                model=self.bot.settings.cursor_model,
+            )
+            await self._launch_new_agent_from_message(
+                message=message,
+                agent_prompt=pending.agent_prompt,  # type: ignore[arg-type]
+                project=project,
+            )
+            return
+
         if self.bot.user not in message.mentions:
             return
         prompt_text = _strip_mention(message.content, self.bot.user)
@@ -562,7 +607,7 @@ class AgentCog(commands.Cog):
     ) -> None:
         # Defer before list_repos — Cursor API can exceed Discord's 3s window.
         if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             urls = await self.bot.cursor.list_repos()
         except Exception as exc:  # noqa: BLE001
@@ -574,35 +619,32 @@ class AgentCog(commands.Cog):
         if not urls:
             await interaction.followup.send(
                 "No Cursor-connected repos found. Link GitHub in the Cursor "
-                "dashboard for this API key, or pass `repo:` explicitly.",
+                "dashboard for this API key, or pass `repo:` on `/ask`.",
                 ephemeral=True,
             )
             return
 
-        async def on_picked(
-            pick_interaction: discord.Interaction, project: Project
-        ) -> None:
-            await self._launch_new_agent(
-                interaction=pick_interaction,
-                agent_prompt=agent_prompt,
-                project=project,
-                announce_channel=interaction.channel,
+        channel = interaction.channel
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            await interaction.followup.send(
+                "Need a text channel to chat.", ephemeral=True
             )
+            return
 
-        view = RepoPickerView(
-            self.bot,
-            prompt=agent_prompt,
-            repo_urls=urls,
-            branch=branch,
-            on_picked=on_picked,
-            owner_id=interaction.user.id,
-            channel=interaction.channel,
+        self.bot.pending_repo_launches[(channel.id, interaction.user.id)] = (
+            PendingRepoLaunch(
+                agent_prompt=agent_prompt,
+                urls=urls,
+                branch=branch,
+                owner_id=interaction.user.id,
+                channel_id=channel.id,
+            )
         )
-        await interaction.followup.send(
-            f"Pick a repo for: **{_truncate_prompt(agent_prompt.display)}**",
-            view=view,
-            ephemeral=True,
+        prompt_text = format_repo_choice_prompt(
+            urls, task_preview=agent_prompt.display
         )
+        posted = await channel.send(prompt_text)
+        await _clear_deferred_thinking(interaction, posted)
 
     async def _offer_repo_picker_message(
         self, *, message: discord.Message, agent_prompt: AgentPrompt
@@ -621,30 +663,40 @@ class AgentCog(commands.Cog):
             )
             return
 
-        async def on_picked(
-            pick_interaction: discord.Interaction, project: Project
-        ) -> None:
-            await self._launch_new_agent(
-                interaction=pick_interaction,
+        self.bot.pending_repo_launches[(message.channel.id, message.author.id)] = (
+            PendingRepoLaunch(
                 agent_prompt=agent_prompt,
-                project=project,
-                announce_channel=message.channel,
+                urls=urls,
+                branch=None,
+                owner_id=message.author.id,
+                channel_id=message.channel.id,
             )
-
-        view = RepoPickerView(
-            self.bot,
-            prompt=agent_prompt,
-            repo_urls=urls,
-            branch=None,
-            on_picked=on_picked,
-            owner_id=message.author.id,
-            channel=message.channel,
         )
         await message.reply(
-            f"Pick a repo for: **{_truncate_prompt(agent_prompt.display)}**",
-            view=view,
+            format_repo_choice_prompt(urls, task_preview=agent_prompt.display),
             mention_author=False,
         )
+
+    async def _maybe_pin_channel_repo(
+        self, channel: discord.abc.Messageable, repo_url: str
+    ) -> None:
+        topic_channel = channel
+        if isinstance(channel, discord.Thread) and isinstance(
+            channel.parent, discord.TextChannel
+        ):
+            topic_channel = channel.parent
+        if not isinstance(topic_channel, discord.TextChannel):
+            return
+        if parse_channel_repo(topic_channel.topic):
+            return
+        if not topic_channel.permissions_for(topic_channel.guild.me).manage_channels:
+            return
+        try:
+            await topic_channel.edit(
+                topic=pin_channel_repo(topic_channel.topic, repo_url)
+            )
+        except discord.HTTPException:
+            logger.warning("channel repo pin failed", exc_info=True)
 
     def _resolve_project(
         self,
@@ -682,19 +734,13 @@ class AgentCog(commands.Cog):
             await interaction.followup.send("Need a text channel or thread.")
             return
 
-        embed = build_starter_embed(
-            agent_id="pending",
-            prompt=agent_prompt.display,
-            project=display_project_alias(project.alias),
-            repo=project.repo,
-            status="starting",
-        )
+        body = chat_ack(prompt=agent_prompt.display, repo=project.repo)
         # Acknowledge the interaction (clears Discord's 3s / thinking UI), but
-        # post the status card via channel.send so later edits use the bot
-        # token — interaction webhook tokens expire after ~15 minutes.
+        # post via channel.send so later edits use the bot token — interaction
+        # webhook tokens expire after ~15 minutes.
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=True)
-        placeholder = await channel.send(embed=embed)
+        placeholder = await channel.send(body)
         await _clear_deferred_thinking(interaction, placeholder)
         thread = await self._ensure_thread(channel, placeholder, agent_prompt.display)
         await self._run_create(
@@ -716,13 +762,7 @@ class AgentCog(commands.Cog):
             await message.reply("Need a text channel.", mention_author=False)
             return
         placeholder = await message.reply(
-            embed=build_starter_embed(
-                agent_id="pending",
-                prompt=agent_prompt.display,
-                project=display_project_alias(project.alias),
-                repo=project.repo,
-                status="starting",
-            ),
+            chat_ack(prompt=agent_prompt.display, repo=project.repo),
             mention_author=False,
         )
         thread = await self._ensure_thread(channel, placeholder, agent_prompt.display)
@@ -757,38 +797,28 @@ class AgentCog(commands.Cog):
         agent_prompt: AgentPrompt,
         project: Project,
     ) -> None:
-        embed = status_message.embeds[0] if status_message.embeds else None
+        editor = ChatStatusEditor(status_message)
 
         async def on_status(state: str, data: dict) -> None:
-            nonlocal embed
-            if embed is None:
-                return
             agent_id = data.get("agent_id") or "pending"
             summary = data.get("snippet") or data.get("result")
-            if data.get("error"):
+            err = data.get("error")
+            if err:
                 state = "error"
-                summary = str(data["error"])
-            embed = build_starter_embed(
+                summary = str(err)
+            body = chat_status_body(
                 agent_id=agent_id,
-                prompt=agent_prompt.display,
-                project=display_project_alias(project.alias),
+                status=state,
                 repo=project.repo,
-                status=state,
-                run_id=data.get("run_id"),
+                snippet=data.get("snippet"),
                 summary=summary,
+                run_id=data.get("run_id"),
                 pr_url=data.get("pr_url"),
-                branch=data.get("branch"),
+                error=str(err) if err else None,
             )
-            view = controls_for(
-                self.bot,
-                agent_id=agent_id,
-                status=state,
-                pr_url=data.get("pr_url"),
+            await editor.set_content(
+                body, force=state not in {"running", "streaming"}
             )
-            try:
-                await status_message.edit(embed=embed, view=view)
-            except discord.HTTPException:
-                logger.warning("failed to edit status message", exc_info=True)
 
         try:
             outcome = await self.bot.cursor.create_and_run(
@@ -805,35 +835,19 @@ class AgentCog(commands.Cog):
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("create_and_run failed")
-            await thread.send(f"Agent failed to start: `{exc}`")
+            await thread.send(chat_failed(exc))
             return
 
-        embed = build_starter_embed(
+        final = chat_status_body(
             agent_id=outcome.agent_id,
-            prompt=agent_prompt.display,
-            project=display_project_alias(project.alias),
-            repo=project.repo,
             status=outcome.status,
+            repo=project.repo,
             summary=outcome.result_text or outcome.error_message,
             run_id=outcome.run_id,
             pr_url=outcome.pr_url,
-            branch=outcome.branch,
+            error=outcome.error_message,
         )
-        view = controls_for(
-            self.bot,
-            agent_id=outcome.agent_id,
-            status=outcome.status,
-            pr_url=outcome.pr_url,
-        )
-        try:
-            await status_message.edit(embed=embed, view=view)
-        except discord.HTTPException:
-            await thread.send(embed=embed, view=view)
-
-        bits = [f"**{outcome.status.title()}.** `{outcome.agent_id}` — reply to continue."]
-        if outcome.pr_url:
-            bits.append(outcome.pr_url)
-        await thread.send(" ".join(bits))
+        await editor.set_content(final, force=True)
         await self._deliver_artifacts(thread, outcome.agent_id)
 
     async def _deliver_artifacts(
@@ -862,13 +876,9 @@ class AgentCog(commands.Cog):
         project_alias: str | None,
     ) -> None:
         status_msg = await interaction.followup.send(
-            embed=build_starter_embed(
-                agent_id=agent_id,
-                prompt=agent_prompt.display,
-                project=project_alias,
-                repo=repo,
-                status="starting",
-            )
+            chat_ack(prompt=agent_prompt.display, repo=repo)
+            + "\n"
+            + ref_spoiler(agent_id)
         )
         await self._drive_follow_up(
             status_message=status_msg,
@@ -888,13 +898,7 @@ class AgentCog(commands.Cog):
         project_alias: str | None,
     ) -> None:
         status_msg = await message.reply(
-            embed=build_starter_embed(
-                agent_id=agent_id,
-                prompt=agent_prompt.display,
-                project=project_alias,
-                repo=repo,
-                status="starting",
-            ),
+            chat_ack(prompt=agent_prompt.display, repo=repo) + "\n" + ref_spoiler(agent_id),
             mention_author=False,
         )
         await self._drive_follow_up(
@@ -914,34 +918,26 @@ class AgentCog(commands.Cog):
         repo: str,
         project_alias: str | None,
     ) -> None:
-        embed = status_message.embeds[0] if status_message.embeds else None
+        editor = ChatStatusEditor(status_message)
 
         async def on_status(state: str, data: dict) -> None:
-            nonlocal embed
             summary = data.get("snippet") or data.get("result") or data.get("error")
-            if data.get("error"):
+            err = data.get("error")
+            if err:
                 state = "error"
-            embed = build_starter_embed(
+            body = chat_status_body(
                 agent_id=agent_id,
-                prompt=agent_prompt.display,
-                project=project_alias,
-                repo=repo,
                 status=state,
+                repo=repo,
+                snippet=data.get("snippet"),
                 summary=summary,
                 run_id=data.get("run_id"),
                 pr_url=data.get("pr_url"),
-                branch=data.get("branch"),
+                error=str(err) if err else None,
             )
-            view = controls_for(
-                self.bot,
-                agent_id=agent_id,
-                status=state,
-                pr_url=data.get("pr_url"),
+            await editor.set_content(
+                body, force=state not in {"running", "streaming"}
             )
-            try:
-                await status_message.edit(embed=embed, view=view)
-            except discord.HTTPException:
-                pass
 
         try:
             outcome = await self.bot.cursor.follow_up(
@@ -956,27 +952,16 @@ class AgentCog(commands.Cog):
             )
             return
 
-        embed = build_starter_embed(
+        final = chat_status_body(
             agent_id=outcome.agent_id,
-            prompt=agent_prompt.display,
-            project=project_alias,
-            repo=repo,
             status=outcome.status,
+            repo=repo,
             summary=outcome.result_text or outcome.error_message,
             run_id=outcome.run_id,
             pr_url=outcome.pr_url,
-            branch=outcome.branch,
+            error=outcome.error_message,
         )
-        view = controls_for(
-            self.bot,
-            agent_id=outcome.agent_id,
-            status=outcome.status,
-            pr_url=outcome.pr_url,
-        )
-        try:
-            await status_message.edit(embed=embed, view=view)
-        except discord.HTTPException:
-            pass
+        await editor.set_content(final, force=True)
 
         channel = status_message.channel
         if isinstance(channel, discord.Thread):
@@ -1002,13 +987,6 @@ def _thread_name(prompt: str) -> str:
     if len(cleaned) > 80:
         cleaned = cleaned[:77] + "…"
     return cleaned or "cursor-agent"
-
-
-def _truncate_prompt(prompt: str) -> str:
-    cleaned = " ".join(prompt.split())
-    if len(cleaned) > 120:
-        return cleaned[:117] + "…"
-    return cleaned
 
 
 async def _clear_deferred_thinking(
