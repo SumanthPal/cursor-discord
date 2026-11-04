@@ -7,7 +7,12 @@ from typing import Union
 
 import discord
 
-from bot.projects import parse_channel_repo, set_channel_repo_topic
+from bot.projects import (
+    clear_channel_repo_topic,
+    compact_repo,
+    parse_channel_repos,
+    set_channel_repo_topic,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,25 +67,41 @@ async def _fetch_topic_channel(
     return None
 
 
+TOPIC_MAX = 1024
+
+
 async def pin_channel_repo(
     bot: discord.Client,
     channel: discord.abc.Messageable | None,
-    repo_url: str,
+    repo_urls: list[str],
     *,
     force: bool = False,
 ) -> str:
-    """Write ``cursor-repo:…`` into the channel topic. Returns a short user-facing note."""
+    """Write ``cursor-repo:a,b`` into the channel topic (empty list clears it).
+
+    Returns a short user-facing note.
+    """
     target = await resolve_topic_channel(bot, channel)
     if target is None:
         logger.warning("channel repo pin skipped: could not resolve topic channel")
         return (
             "Couldn't pin a channel default (not a text/forum channel I can see). "
-            "You'll keep getting the repo picker here."
+            "You'll keep getting asked which repo to use here."
         )
 
-    existing = parse_channel_repo(target.topic)
+    existing = parse_channel_repos(target.topic)
     if existing and not force:
-        return f"Channel already pinned to `{_compact(existing)}`."
+        return f"Channel already pinned to {_fmt(existing)}."
+
+    if repo_urls:
+        new_topic = set_channel_repo_topic(target.topic, repo_urls)
+    else:
+        new_topic = clear_channel_repo_topic(target.topic)
+    if len(new_topic) > TOPIC_MAX:
+        return (
+            f"Too many repos for one channel topic ({len(new_topic)}/{TOPIC_MAX} "
+            "chars). Pick fewer."
+        )
 
     me = target.guild.me
     if me is None or not target.permissions_for(me).manage_channels:
@@ -92,10 +113,9 @@ async def pin_channel_repo(
         return (
             f"Couldn't pin **#{target.name}** — I need **Manage Channels** "
             f"here (server invite isn't enough if this channel denies it). "
-            f"Fix perms or set topic to `cursor-repo:{_compact(repo_url)}` manually."
+            f"Fix perms or set the topic to `{new_topic}` manually."
         )
 
-    new_topic = set_channel_repo_topic(target.topic, repo_url)
     try:
         await target.edit(topic=new_topic)
     except discord.HTTPException:
@@ -104,13 +124,14 @@ async def pin_channel_repo(
         )
         return (
             f"Couldn't update topic on **#{target.name}** (Discord rejected the edit). "
-            f"Set `cursor-repo:{_compact(repo_url)}` manually?"
+            f"Set it to `{new_topic}` manually?"
         )
 
-    logger.info(
-        "pinned channel #%s (%s) → %s", target.name, target.id, _compact(repo_url)
-    )
-    return f"Pinned **#{target.name}** → `{_compact(repo_url)}` (saved in channel topic)."
+    if not repo_urls:
+        logger.info("cleared channel #%s (%s)", target.name, target.id)
+        return f"Cleared repo binding on **#{target.name}**."
+    logger.info("pinned channel #%s (%s) → %s", target.name, target.id, repo_urls)
+    return f"Pinned **#{target.name}** → {_fmt(repo_urls)} (saved in channel topic)."
 
 
 def topic_from_channel(channel: TopicChannel | None) -> str | None:
@@ -119,9 +140,5 @@ def topic_from_channel(channel: TopicChannel | None) -> str | None:
     return channel.topic
 
 
-def _compact(repo: str) -> str:
-    url = repo.strip().rstrip("/")
-    for prefix in ("https://github.com/", "http://github.com/"):
-        if url.startswith(prefix):
-            return url.removeprefix(prefix)
-    return url
+def _fmt(repos: list[str]) -> str:
+    return ", ".join(f"`{compact_repo(r)}`" for r in repos)

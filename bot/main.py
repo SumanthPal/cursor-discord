@@ -42,6 +42,8 @@ class CursorDiscordBot(commands.Bot):
         self.repo_ref_cache: dict[str, str] = {}
         # Cloud agent artifact paths already posted to Discord (per bc- id).
         self.posted_artifacts: dict[str, set[str]] = {}
+        # Waiting for a chat reply with owner/repo (key: channel_id, user_id).
+        self.pending_repo_asks: dict[tuple[int, int], object] = {}
         self._http_runner: web.AppRunner | None = None
 
     async def setup_hook(self) -> None:

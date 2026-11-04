@@ -38,22 +38,43 @@ class ProjectRegistry:
     def aliases(self) -> list[str]:
         return sorted(self.projects)
 
+    def channel_projects(
+        self, channel_topic: str | None, default_model: str | None = None
+    ) -> list[Project]:
+        """Repos a channel is bound to: `cursor-repo:a/b,c/d`, else `cursor-project:alias`."""
+        repos = parse_channel_repos(channel_topic)
+        if repos:
+            return [
+                Project(alias="_channel", repo=r, model=default_model) for r in repos
+            ]
+        alias = parse_channel_project(channel_topic)
+        found = self.get(alias) if alias else None
+        if not found:
+            return []
+        return [
+            Project(
+                alias=found.alias,
+                repo=found.repo,
+                branch=found.branch,
+                model=found.model or default_model,
+            )
+        ]
+
     def resolve(
         self,
         *,
         project: str | None = None,
         repo: str | None = None,
         branch: str | None = None,
-        channel_topic: str | None = None,
         default_model: str | None = None,
     ) -> Project | None:
         """Resolution order:
 
         1. Explicit repo (slash / picker)
         2. Explicit project alias (slash / YAML nicknames)
-        3. Channel topic `cursor-repo:…`
-        4. Channel topic `cursor-project:…` (YAML nickname)
-        5. Registry default alias
+        3. Registry default alias
+
+        Channel bindings are handled by `channel_projects`.
         """
         branch_s = _normalize_branch(branch)
 
@@ -77,17 +98,6 @@ class ProjectRegistry:
                 model=found.model or default_model,
             )
 
-        if channel_topic:
-            channel_repo = parse_channel_repo(channel_topic)
-            if channel_repo:
-                return Project(
-                    alias="_channel",
-                    repo=channel_repo,
-                    branch=branch_s,
-                    model=default_model,
-                )
-            alias = parse_channel_project(channel_topic)
-
         if not alias:
             alias = self.default
         if not alias:
@@ -106,12 +116,55 @@ class ProjectRegistry:
 
 
 def normalize_repo(value: str) -> str:
-    value = value.strip()
+    value = value.strip().strip("`")
     if value.startswith("http://") or value.startswith("https://"):
         return value.rstrip("/")
     if value.count("/") == 1 and " " not in value:
         return f"https://github.com/{value}"
     return value.rstrip("/")
+
+
+# Leading token: owner/repo or https://github.com/owner/repo(.git)
+_REPO_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?"
+    r"|"
+    r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
+    r")(?=\s|$)",
+    re.IGNORECASE,
+)
+
+
+def split_repo_prefix(text: str) -> tuple[str | None, str]:
+    """If ``text`` starts with owner/repo or a GitHub URL, peel it off.
+
+    Returns ``(normalized_clone_url | None, remainder)``.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None, ""
+    match = _REPO_PREFIX_RE.match(raw)
+    if not match:
+        return None, raw
+    path = match.group(1) or match.group(2)
+    rest = raw[match.end() :].strip()
+    return normalize_repo(path), rest
+
+
+def match_allowed_repo(typed: str, allowed: list[str]) -> str | None:
+    """Resolve a typed URL / owner/repo / fragment to one URL in ``allowed``."""
+    typed = (typed or "").strip().strip("`")
+    if not typed or not allowed:
+        return None
+    want = normalize_repo(typed)
+    for url in allowed:
+        if same_repo(url, want):
+            return url.rstrip("/")
+    needle = compact_repo(want).lower()
+    hits = [u for u in allowed if needle in compact_repo(u).lower()]
+    if len(hits) == 1:
+        return hits[0].rstrip("/")
+    return None
 
 
 def _normalize_branch(value: str | None) -> str | None:
@@ -130,13 +183,32 @@ def parse_channel_project(topic: str | None) -> str | None:
     return match.group(1).lower()
 
 
-def parse_channel_repo(topic: str | None) -> str | None:
+def parse_channel_repos(topic: str | None) -> list[str]:
     if not topic:
-        return None
+        return []
     match = CHANNEL_REPO_RE.search(topic)
     if not match:
-        return None
-    return normalize_repo(match.group(1))
+        return []
+    out: list[str] = []
+    for part in match.group(1).split(","):
+        part = part.strip()
+        if part:
+            url = normalize_repo(part)
+            if url not in out:
+                out.append(url)
+    return out
+
+
+def same_repo(a: str, b: str) -> bool:
+    return normalize_repo(a).lower() == normalize_repo(b).lower()
+
+
+def compact_repo(repo: str) -> str:
+    url = normalize_repo(repo)
+    for prefix in ("https://github.com/", "http://github.com/"):
+        if url.startswith(prefix):
+            return url.removeprefix(prefix)
+    return url
 
 
 def set_channel_project_topic(topic: str | None, alias: str) -> str:
@@ -150,16 +222,15 @@ def set_channel_project_topic(topic: str | None, alias: str) -> str:
     return f"{base.rstrip()} {marker}"
 
 
-def set_channel_repo_topic(topic: str | None, repo: str) -> str:
-    """Upsert `cursor-repo:owner/repo` (compact) into a channel topic."""
-    url = normalize_repo(repo)
-    # Prefer compact owner/repo in the topic for readability.
-    compact = url
-    if compact.startswith("https://github.com/"):
-        compact = compact.removeprefix("https://github.com/")
-    elif compact.startswith("http://github.com/"):
-        compact = compact.removeprefix("http://github.com/")
-    marker = f"cursor-repo:{compact}"
+def clear_channel_repo_topic(topic: str | None) -> str:
+    return " ".join(CHANNEL_REPO_RE.sub(" ", topic or "").split())
+
+
+def set_channel_repo_topic(topic: str | None, repos: str | list[str]) -> str:
+    """Upsert `cursor-repo:owner/a,owner/b` (compact) into a channel topic."""
+    if isinstance(repos, str):
+        repos = [repos]
+    marker = "cursor-repo:" + ",".join(compact_repo(r) for r in repos)
     base = topic or ""
     if CHANNEL_REPO_RE.search(base):
         return CHANNEL_REPO_RE.sub(f" {marker} ", base).strip()

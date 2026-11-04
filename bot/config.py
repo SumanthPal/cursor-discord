@@ -28,6 +28,8 @@ class Settings:
     projects_path: str
     allowed_user_ids: frozenset[int]
     allowed_guild_ids: frozenset[int]
+    superuser_ids: frozenset[int]
+    cursor_role_name: str
     discord_guild_id: int | None
     port: int
     rate_limit_max: int
@@ -61,6 +63,9 @@ def load_settings() -> Settings:
         projects_path=os.environ.get("PROJECTS_PATH", "/app/projects.yaml"),
         allowed_user_ids=_csv_ids(os.environ.get("ALLOWED_USER_IDS")),
         allowed_guild_ids=_csv_ids(os.environ.get("ALLOWED_GUILD_IDS")),
+        superuser_ids=_csv_ids(os.environ.get("SUPERUSER_IDS")),
+        cursor_role_name=os.environ.get("CURSOR_ROLE_NAME", "Cursor").strip()
+        or "Cursor",
         discord_guild_id=discord_guild_id,
         port=int(os.environ.get("PORT", "8080")),
         rate_limit_max=int(os.environ.get("RATE_LIMIT_MAX", "8")),

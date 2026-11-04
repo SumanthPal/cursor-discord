@@ -29,10 +29,14 @@ from bot.policy import Policy  # noqa: E402
 from bot.config import Settings  # noqa: E402
 from bot.projects import (  # noqa: E402
     load_registry,
+    clear_channel_repo_topic,
+    match_allowed_repo,
     parse_channel_project,
-    parse_channel_repo,
+    parse_channel_repos,
+    same_repo,
     set_channel_project_topic,
     set_channel_repo_topic,
+    split_repo_prefix,
 )
 
 
@@ -76,14 +80,53 @@ def test_channel_bind() -> None:
 
     repo_topic = set_channel_repo_topic("standup", "https://github.com/acme/widgets")
     assert repo_topic == "standup cursor-repo:acme/widgets"
-    assert parse_channel_repo(repo_topic) == "https://github.com/acme/widgets"
-    reg = load_registry(projects_json='{"projects":{}}')
-    pinned = reg.resolve(channel_topic=repo_topic)
-    assert pinned is not None and pinned.alias == "_channel"
-    assert pinned.repo.endswith("/acme/widgets")
+    assert parse_channel_repos(repo_topic) == ["https://github.com/acme/widgets"]
+    reg = load_registry(projects_json='{"projects":{"web":{"repo":"acme/web"}}}')
+    pinned = reg.channel_projects(repo_topic)
+    assert len(pinned) == 1 and pinned[0].alias == "_channel"
+    assert pinned[0].repo.endswith("/acme/widgets")
+
+    multi = set_channel_repo_topic(repo_topic, ["acme/a", "https://github.com/acme/b"])
+    assert multi == "standup cursor-repo:acme/a,acme/b"
+    assert [p.repo for p in reg.channel_projects(multi)] == [
+        "https://github.com/acme/a",
+        "https://github.com/acme/b",
+    ]
+    assert clear_channel_repo_topic(multi) == "standup"
+    assert reg.channel_projects("cursor-project:web")[0].repo.endswith("/acme/web")
+    assert reg.channel_projects("no binding") == []
+    assert same_repo("acme/A", "https://github.com/acme/a/")
     assert display_project_alias("_channel") is None
     assert display_project_alias("instinct") == "instinct"
     print("ok channel_bind")
+
+
+def test_split_repo_prefix() -> None:
+    url, rest = split_repo_prefix("SumanthPal/cursor-discord fix flaky test")
+    assert url == "https://github.com/SumanthPal/cursor-discord"
+    assert rest == "fix flaky test"
+    url2, rest2 = split_repo_prefix(
+        "https://github.com/acme/app.git please ship it"
+    )
+    assert url2 == "https://github.com/acme/app"
+    assert rest2 == "please ship it"
+    url3, rest3 = split_repo_prefix("just a normal prompt")
+    assert url3 is None and rest3 == "just a normal prompt"
+    assert split_repo_prefix("acme/app") == (
+        "https://github.com/acme/app",
+        "",
+    )
+
+    allowed = [
+        "https://github.com/SumanthPal/cursor-discord",
+        "https://github.com/acme/widgets",
+    ]
+    assert (
+        match_allowed_repo("SumanthPal/cursor-discord", allowed) == allowed[0]
+    )
+    assert match_allowed_repo("widgets", allowed) == allowed[1]
+    assert match_allowed_repo("nope", allowed) is None
+    print("ok split_repo_prefix")
 
 
 def test_agent_embed() -> None:
@@ -151,22 +194,28 @@ def test_policy() -> None:
     class G:
         id = 99
 
-    settings = Settings(
-        discord_token="x",
-        discord_client_id="y",
-        cursor_api_key="z",
-        cursor_model="composer-2.5",
-        projects_json=None,
-        projects_path="/app/projects.yaml",
-        allowed_user_ids=frozenset({1}),
-        allowed_guild_ids=frozenset({99}),
-        discord_guild_id=None,
-        port=8080,
-        rate_limit_max=2,
-        rate_limit_window_sec=60,
-        bridge_workspace="/tmp/x",
-    )
-    policy = Policy(settings)
+    def make(**overrides: object) -> Settings:
+        base: dict[str, object] = dict(
+            discord_token="x",
+            discord_client_id="y",
+            cursor_api_key="z",
+            cursor_model="composer-2.5",
+            projects_json=None,
+            projects_path="/app/projects.yaml",
+            allowed_user_ids=frozenset({1}),
+            allowed_guild_ids=frozenset({99}),
+            superuser_ids=frozenset(),
+            cursor_role_name="Cursor",
+            discord_guild_id=None,
+            port=8080,
+            rate_limit_max=2,
+            rate_limit_window_sec=60,
+            bridge_workspace="/tmp/x",
+        )
+        base.update(overrides)
+        return Settings(**base)  # type: ignore[arg-type]
+
+    policy = Policy(make())
     assert policy.authorize(user=U(), guild=G()) is None
     assert policy.authorize(user=U(), guild=G()) is None
     assert policy.authorize(user=U(), guild=G()) is not None  # rate limit
@@ -175,6 +224,27 @@ def test_policy() -> None:
         id = 2
 
     assert policy.authorize(user=BadU(), guild=G(), consume_rate=False) is not None
+    assert not policy.is_admin(U())
+
+    class Role:
+        name = "Cursor"
+
+    class Granted:
+        id = 3
+        roles = [Role()]
+
+    class Super:
+        id = 7
+
+    gated = Policy(make(allowed_user_ids=frozenset(), superuser_ids=frozenset({7})))
+    assert gated.check_user(Granted()) is None
+    assert gated.check_user(BadU()) is not None
+    assert gated.check_user(Super()) is None
+    assert gated.is_admin(Super()) and not gated.is_admin(Granted())
+    assert gated.check_admin(Granted()) is not None
+
+    open_policy = Policy(make(allowed_user_ids=frozenset()))
+    assert open_policy.open_mode and open_policy.is_admin(BadU())
     print("ok policy")
 
 
@@ -292,6 +362,7 @@ def main() -> None:
     test_projects_json()
     test_projects_yaml_file()
     test_channel_bind()
+    test_split_repo_prefix()
     test_agent_embed()
     test_chunk_footer()
     test_policy()

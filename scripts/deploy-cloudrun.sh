@@ -109,6 +109,12 @@ PY
   if [[ -n "${ALLOWED_GUILD_IDS:-}" ]]; then
     echo "ALLOWED_GUILD_IDS: \"${ALLOWED_GUILD_IDS}\""
   fi
+  if [[ -n "${SUPERUSER_IDS:-}" ]]; then
+    echo "SUPERUSER_IDS: \"${SUPERUSER_IDS}\""
+  fi
+  if [[ -n "${CURSOR_ROLE_NAME:-}" ]]; then
+    echo "CURSOR_ROLE_NAME: \"${CURSOR_ROLE_NAME}\""
+  fi
   if [[ -n "${CURSOR_MODEL:-}" ]]; then
     echo "CURSOR_MODEL: \"${CURSOR_MODEL}\""
   fi
