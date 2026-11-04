@@ -16,6 +16,14 @@ from bot.agent_ref import (  # noqa: E402
     parse_agent_ref_from_embed,
     parse_ref_spoiler,
 )
+from bot.chat_ui import (  # noqa: E402
+    format_repo_choice_prompt,
+    resolve_repo_from_reply,
+)
+from bot.turn_coordinator import (  # noqa: E402
+    chat_queue_ack,
+    is_agent_busy_error,
+)
 from bot.commands import chunk_discord_lines, display_project_alias  # noqa: E402
 from bot.cloud_artifacts import (  # noqa: E402
     artifact_filename,
@@ -291,6 +299,45 @@ def test_multimodal_prompt() -> None:
     print("ok multimodal_prompt")
 
 
+def test_chat_status_trailer() -> None:
+    from bot.chat_ui import chat_status_body
+
+    agent_id = "bc-00000000-0000-0000-0000-000000000001"
+    body = chat_status_body(
+        agent_id=agent_id,
+        status="finished",
+        summary="x" * 1800,
+        run_id="run-1",
+        pr_url="https://github.com/acme/app/pull/1",
+    )
+    assert agent_id in body
+    assert "run-1" in body
+    print("ok chat_status_trailer")
+
+
+def test_follow_up_queue() -> None:
+    assert is_agent_busy_error(
+        Exception("failed_precondition: [agent_busy] Agent already has an active run")
+    )
+    assert not is_agent_busy_error(Exception("network timeout"))
+    assert "next" in chat_queue_ack(depth=1)
+    assert "#3" in chat_queue_ack(depth=3)
+    print("ok follow_up_queue")
+
+
+def test_chat_repo_reply() -> None:
+    urls = [
+        "https://github.com/acme/widgets",
+        "https://github.com/acme/monorepo",
+    ]
+    prompt = format_repo_choice_prompt(urls, task_preview="fix login")
+    assert "1." in prompt and "acme/widgets" in prompt
+    assert resolve_repo_from_reply("2", urls) == urls[1]
+    assert resolve_repo_from_reply("widgets", urls) == urls[0]
+    assert resolve_repo_from_reply("nope", urls) is None
+    print("ok chat_repo_reply")
+
+
 def test_repos_matching() -> None:
     from bot.repo_refs import repos_matching
 
@@ -368,6 +415,9 @@ def main() -> None:
     test_policy()
     test_multimodal_prompt()
     test_cloud_artifacts()
+    test_chat_status_trailer()
+    test_follow_up_queue()
+    test_chat_repo_reply()
     test_repos_matching()
     test_repo_refs()
     test_activity_snippet()

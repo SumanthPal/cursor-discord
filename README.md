@@ -2,7 +2,9 @@
 
 Discord → [Cursor cloud agents](https://cursor.com/docs/cloud-agent/api/endpoints).
 
-**Use:** `@Cursor owner/repo <prompt>` or `/ask` (optional PNG/JPEG/GIF/WebP) · if several repos are allowed, reply with `owner/repo` or a GitHub URL · reply in the thread to steer · Cancel / Open PR on the card · agent demo artifacts post to the thread when a run finishes (`/artifacts` to retry).
+**Use:** `@Cursor owner/repo <prompt>` or `/ask` (optional PNG/JPEG/GIF/WebP) · a thread branches from your `@Cursor` message (or a `/ask` anchor) — plain-text replies inside it; I **queue** follow-ups if a run is still active · `/cancel` to stop · PR links in replies · demo artifacts post when a run finishes (`/artifacts` to retry).
+
+If several repos are allowed, I ask in chat — reply with `owner/repo` or a GitHub URL (no dropdown).
 
 ## Access
 
@@ -11,8 +13,6 @@ Discord → [Cursor cloud agents](https://cursor.com/docs/cloud-agent/api/endpoi
 - Everyone else is denied. If neither `SUPERUSER_IDS` nor `ALLOWED_USER_IDS` is set, everyone is treated as an admin (legacy open mode).
 
 Bot permissions: **Manage Channels** on the work channels (to write topics; the invite bit isn't enough if a channel or category denies it) and **Manage Roles**, with the bot's role above **Cursor**. When it joins a server, the bot posts a setup checklist in the system channel.
-
-When the repo picker appears, use **Search** to filter by owner or repo name (Discord’s dropdown only shows 25 at a time; **Next** pages through the rest).
 
 ## Local
 

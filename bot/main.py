@@ -9,6 +9,7 @@ from aiohttp import web
 from discord.ext import commands
 
 from bot.commands import AgentCog
+from bot.turn_coordinator import TurnCoordinator
 from bot.config import Settings, load_settings
 from bot.cursor_agent import CursorAgentService, ensure_api_key_env
 from bot.policy import Policy
@@ -29,6 +30,7 @@ class CursorDiscordBot(commands.Bot):
         registry: ProjectRegistry,
         policy: Policy,
         cursor: CursorAgentService,
+        turns: TurnCoordinator | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -44,6 +46,7 @@ class CursorDiscordBot(commands.Bot):
         self.posted_artifacts: dict[str, set[str]] = {}
         # Waiting for a chat reply with owner/repo (key: channel_id, user_id).
         self.pending_repo_asks: dict[tuple[int, int], object] = {}
+        self.turns = turns or TurnCoordinator()
         self._http_runner: web.AppRunner | None = None
 
     async def setup_hook(self) -> None:
@@ -119,13 +122,19 @@ def build_bot(settings: Settings | None = None) -> CursorDiscordBot:
         registry.default,
     )
     policy = Policy(settings)
+    turns = TurnCoordinator()
     cursor = CursorAgentService(
         api_key=settings.cursor_api_key,
         default_model=settings.cursor_model,
         bridge_workspace=settings.bridge_workspace,
+        turns=turns,
     )
     return CursorDiscordBot(
-        settings=settings, registry=registry, policy=policy, cursor=cursor
+        settings=settings,
+        registry=registry,
+        policy=policy,
+        cursor=cursor,
+        turns=turns,
     )
 
 

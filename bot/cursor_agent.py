@@ -18,6 +18,8 @@ from cursor_sdk import (
     UserMessage,
 )
 
+from bot.turn_coordinator import AgentBusyError, is_agent_busy_error
+
 AgentMessage = str | UserMessage
 
 logger = logging.getLogger(__name__)
@@ -39,12 +41,20 @@ class RunOutcome:
 class CursorAgentService:
     """Thin async wrapper around cursor-sdk cloud agents."""
 
-    def __init__(self, *, api_key: str, default_model: str, bridge_workspace: str) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        default_model: str,
+        bridge_workspace: str,
+        turns: object | None = None,
+    ) -> None:
         self.api_key = api_key
         self.default_model = default_model
         self.bridge_workspace = bridge_workspace
         self._client: AsyncClient | None = None
         self._active_runs: dict[str, AsyncRun] = {}
+        self._turns = turns
 
     @property
     def client(self) -> AsyncClient:
@@ -98,11 +108,16 @@ class CursorAgentService:
         if on_status:
             await on_status("created", {"agent_id": agent_id})
 
-        try:
+        async def _send_and_run() -> RunOutcome:
             run = await agent.send(prompt)
             return await self._drive_run(
                 agent_id=agent_id, run=run, on_status=on_status
             )
+
+        try:
+            if self._turns is not None:
+                return await self._turns.run_exclusive(agent_id, _send_and_run)  # type: ignore[union-attr]
+            return await _send_and_run()
         finally:
             close = getattr(agent, "aclose", None) or getattr(agent, "close", None)
             if close is not None:
@@ -135,6 +150,9 @@ class CursorAgentService:
                 result = close()
                 if hasattr(result, "__await__"):
                     await result  # type: ignore[misc]
+
+    def is_run_active(self, agent_id: str) -> bool:
+        return agent_id in self._active_runs
 
     async def list_repos(self) -> list[str]:
         """URLs Cursor can clone for this API key (GitHub-connected account)."""
@@ -248,7 +266,7 @@ class CursorAgentService:
                     {
                         "agent_id": agent_id,
                         "run_id": run_id,
-                        "snippet": snippet,
+                        "snippet": snippet[-1900:],
                     },
                 )
             result: RunResult = await run.wait()
