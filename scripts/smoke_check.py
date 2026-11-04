@@ -17,6 +17,14 @@ from bot.agent_ref import (  # noqa: E402
     parse_ref_spoiler,
 )
 from bot.commands import chunk_discord_lines, display_project_alias  # noqa: E402
+from bot.cloud_artifacts import (  # noqa: E402
+    artifact_filename,
+    artifact_fingerprint,
+    is_image_artifact,
+)
+from bot.multimodal import AgentPrompt, is_image_attachment  # noqa: E402
+from cursor_sdk import SdkArtifact  # noqa: E402
+from cursor_sdk import SDKImage  # noqa: E402
 from bot.policy import Policy  # noqa: E402
 from bot.config import Settings  # noqa: E402
 from bot.projects import (  # noqa: E402
@@ -174,6 +182,42 @@ def test_imports() -> None:
     print("ok imports")
 
 
+def test_cloud_artifacts() -> None:
+    art = SdkArtifact(
+        path="artifacts/demo/recording_demo.mp4",
+        size_bytes=100,
+        updated_at="2026-01-01T00:00:00Z",
+    )
+    fp = artifact_fingerprint(art)
+    assert "artifacts/demo" in fp
+    assert artifact_filename(art.path) == "recording_demo.mp4"
+    assert is_image_artifact("artifacts/screenshot.png")
+    assert not is_image_artifact("artifacts/log.txt")
+    print("ok cloud_artifacts")
+
+
+def test_multimodal_prompt() -> None:
+    plain = AgentPrompt.from_text("fix the button")
+    assert plain.sdk_message() == "fix the button"
+    assert plain.display == "fix the button"
+    rejected = AgentPrompt(text="", actionable=False, feedback="SVG not supported")
+    assert not rejected.has_content
+    assert rejected.display == "SVG not supported"
+    img = SDKImage.from_data(b"\x89PNG\r\n", "image/png")
+    rich = AgentPrompt(text="look at this", images=(img,))
+    assert rich.display.endswith("(+1 image)")
+    msg = rich.sdk_message()
+    assert getattr(msg, "text", None) == "look at this"
+    assert getattr(msg, "images", None)
+
+    class FakeAtt:
+        content_type = "image/png"
+        filename = "x.png"
+
+    assert is_image_attachment(FakeAtt())  # type: ignore[arg-type]
+    print("ok multimodal_prompt")
+
+
 def test_repo_refs() -> None:
     from bot.repo_refs import decode_repo_ref, encode_repo_ref
 
@@ -203,6 +247,8 @@ def main() -> None:
     test_agent_embed()
     test_chunk_footer()
     test_policy()
+    test_multimodal_prompt()
+    test_cloud_artifacts()
     test_repo_refs()
     print("ALL SMOKE CHECKS PASSED")
 
