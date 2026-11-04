@@ -2,7 +2,7 @@
 
 Discord → [Cursor cloud agents](https://cursor.com/docs/cloud-agent/api/endpoints).
 
-**Use:** `@Cursor <prompt>` or `/ask` (optional PNG/JPEG/GIF/WebP on the same message) · the bot replies in plain text in a thread — keep chatting there to steer · `/cancel` to stop · PR links appear in the reply · demo artifacts (screenshots/videos) post when a run finishes · `/artifacts` to retry.
+**Use:** `@Cursor <prompt>` or `/ask` (optional PNG/JPEG/GIF/WebP on the same message) · a thread branches from your `@Cursor` message (or a `/ask` anchor) — the bot replies in plain text inside it; keep chatting there to steer · `/cancel` to stop · PR links appear in the reply · demo artifacts (screenshots/videos) post when a run finishes · `/artifacts` to retry.
 
 No default repo on the channel? The bot asks which repo — reply with the list number or name (no dropdown). First pick can write `cursor-repo:owner/repo` into the channel topic (needs **Manage Channels**). Override anytime with `/ask` + `repo:`.
 

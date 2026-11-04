@@ -26,12 +26,20 @@ def clip_discord(text: str, limit: int = DISCORD_CONTENT_MAX) -> str:
 _ACTIVE = frozenset({"starting", "created", "running", "streaming"})
 
 
-def chat_ack(*, prompt: str, repo: str | None = None) -> str:
-    """First bot line when a run starts — echoes the ask, then a short working line."""
-    cleaned = " ".join((prompt or "").split())
-    if len(cleaned) > 400:
-        cleaned = cleaned[:397] + "…"
-    lines = [cleaned] if cleaned else []
+def chat_ack(
+    *,
+    prompt: str,
+    repo: str | None = None,
+    echo_prompt: bool = True,
+) -> str:
+    """First bot line when a run starts — echoes the ask unless the thread anchor is the user message."""
+    lines: list[str] = []
+    if echo_prompt:
+        cleaned = " ".join((prompt or "").split())
+        if len(cleaned) > 400:
+            cleaned = cleaned[:397] + "…"
+        if cleaned:
+            lines.append(cleaned)
     lines.append(chat_working(repo=repo))
     return clip_discord("\n".join(lines))
 
@@ -142,6 +150,8 @@ class PendingRepoLaunch:
     branch: str | None
     owner_id: int
     channel_id: int
+    # Message to branch the public thread from (usually the @Cursor trigger).
+    thread_anchor_message_id: int
 
 
 class ChatStatusEditor:

@@ -38,7 +38,7 @@ DISCORD_CONTENT_MAX = 2000
 
 HELP_TEXT = """**Cursor** — chat with a cloud coding agent
 • `@Cursor …` or `/ask` — say what you want (images on the same message work too)
-• I'll reply in plain text in a thread; keep talking there to steer the run
+• I branch a thread from your `@Cursor` message; keep talking there to steer the run
 • No repo set on the channel yet? I'll ask which one — reply with the number or name
 • `/cancel` stops a run · PR links show up in my reply when one is opened
 • Demo screenshots/videos land in the thread when a run finishes (`/artifacts` to retry)
@@ -553,10 +553,21 @@ class AgentCog(commands.Cog):
                 branch=(pending.branch or "").strip() or None,
                 model=self.bot.settings.cursor_model,
             )
+            try:
+                anchor = await message.channel.fetch_message(
+                    pending.thread_anchor_message_id
+                )
+            except discord.NotFound:
+                await message.reply(
+                    "Couldn't find the original ask — `@Cursor` again to restart.",
+                    mention_author=False,
+                )
+                return
             await self._launch_new_agent_from_message(
                 message=message,
                 agent_prompt=pending.agent_prompt,  # type: ignore[arg-type]
                 project=project,
+                thread_anchor=anchor,
             )
             return
 
@@ -631,6 +642,10 @@ class AgentCog(commands.Cog):
             )
             return
 
+        prompt_text = format_repo_choice_prompt(
+            urls, task_preview=agent_prompt.display
+        )
+        posted = await channel.send(prompt_text)
         self.bot.pending_repo_launches[(channel.id, interaction.user.id)] = (
             PendingRepoLaunch(
                 agent_prompt=agent_prompt,
@@ -638,12 +653,9 @@ class AgentCog(commands.Cog):
                 branch=branch,
                 owner_id=interaction.user.id,
                 channel_id=channel.id,
+                thread_anchor_message_id=posted.id,
             )
         )
-        prompt_text = format_repo_choice_prompt(
-            urls, task_preview=agent_prompt.display
-        )
-        posted = await channel.send(prompt_text)
         await _clear_deferred_thinking(interaction, posted)
 
     async def _offer_repo_picker_message(
@@ -670,6 +682,7 @@ class AgentCog(commands.Cog):
                 branch=None,
                 owner_id=message.author.id,
                 channel_id=message.channel.id,
+                thread_anchor_message_id=message.id,
             )
         )
         await message.reply(
@@ -734,17 +747,19 @@ class AgentCog(commands.Cog):
             await interaction.followup.send("Need a text channel or thread.")
             return
 
-        body = chat_ack(prompt=agent_prompt.display, repo=project.repo)
-        # Acknowledge the interaction (clears Discord's 3s / thinking UI), but
-        # post via channel.send so later edits use the bot token — interaction
-        # webhook tokens expire after ~15 minutes.
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=True)
-        placeholder = await channel.send(body)
-        await _clear_deferred_thinking(interaction, placeholder)
-        thread = await self._ensure_thread(channel, placeholder, agent_prompt.display)
+
+        thread, status_message = await self._open_agent_thread(
+            channel=channel,
+            prompt=agent_prompt.display,
+            repo=project.repo,
+            thread_anchor=None,
+            interaction_user=interaction.user,
+        )
+        await _clear_deferred_thinking(interaction, status_message)
         await self._run_create(
-            status_message=placeholder,
+            status_message=status_message,
             thread=thread,
             agent_prompt=agent_prompt,
             project=project,
@@ -756,37 +771,75 @@ class AgentCog(commands.Cog):
         message: discord.Message,
         agent_prompt: AgentPrompt,
         project: Project,
+        thread_anchor: discord.Message | None = None,
     ) -> None:
         channel = message.channel
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             await message.reply("Need a text channel.", mention_author=False)
             return
-        placeholder = await message.reply(
-            chat_ack(prompt=agent_prompt.display, repo=project.repo),
-            mention_author=False,
+        thread, status_message = await self._open_agent_thread(
+            channel=channel,
+            prompt=agent_prompt.display,
+            repo=project.repo,
+            thread_anchor=thread_anchor or message,
         )
-        thread = await self._ensure_thread(channel, placeholder, agent_prompt.display)
         await self._run_create(
-            status_message=placeholder,
+            status_message=status_message,
             thread=thread,
             agent_prompt=agent_prompt,
             project=project,
         )
 
+    async def _open_agent_thread(
+        self,
+        *,
+        channel: discord.TextChannel | discord.Thread,
+        prompt: str,
+        repo: str | None,
+        thread_anchor: discord.Message | None = None,
+        interaction_user: discord.User | discord.Member | None = None,
+    ) -> tuple[discord.Thread, discord.Message]:
+        """Branch a public thread from the anchor message; first bot reply lives inside the thread."""
+        if isinstance(channel, discord.Thread):
+            status_message = await channel.send(
+                chat_ack(prompt=prompt, repo=repo, echo_prompt=False)
+            )
+            return channel, status_message
+
+        anchor = thread_anchor
+        if anchor is None:
+            who = (
+                interaction_user.display_name
+                if interaction_user is not None
+                else "Someone"
+            )
+            anchor = await channel.send(
+                clip_discord(f"**{who}:** {prompt}"),
+            )
+
+        thread = await self._ensure_thread(channel, anchor, prompt)
+        status_message = await thread.send(
+            chat_ack(prompt=prompt, repo=repo, echo_prompt=False)
+        )
+        return thread, status_message
+
     async def _ensure_thread(
         self,
         channel: discord.TextChannel | discord.Thread,
-        starter: discord.Message,
+        anchor: discord.Message,
         prompt: str,
     ) -> discord.Thread:
         if isinstance(channel, discord.Thread):
             return channel
+        existing = getattr(anchor, "thread", None)
+        if existing is not None:
+            return existing
         name = _thread_name(prompt)
         try:
-            return await starter.create_thread(name=name)
+            return await anchor.create_thread(name=name)
         except discord.HTTPException:
             return await channel.create_thread(
-                name=name, message=starter, type=discord.ChannelType.public_thread
+                name=name, message=anchor, type=discord.ChannelType.public_thread
             )
 
     async def _run_create(
