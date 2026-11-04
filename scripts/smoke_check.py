@@ -221,6 +221,21 @@ def test_multimodal_prompt() -> None:
     print("ok multimodal_prompt")
 
 
+def test_repos_matching() -> None:
+    from bot.repo_refs import repos_matching
+
+    urls = [
+        "https://github.com/acme/frontend",
+        "https://github.com/acme/backend",
+        "https://github.com/other/widget",
+    ]
+    assert repos_matching(urls, "") == urls
+    assert repos_matching(urls, "acme") == urls[:2]
+    assert repos_matching(urls, "widget") == [urls[2]]
+    assert repos_matching(urls, "nope") == []
+    print("ok repos_matching")
+
+
 def test_repo_refs() -> None:
     from bot.repo_refs import decode_repo_ref, encode_repo_ref
 
@@ -282,6 +297,7 @@ def main() -> None:
     test_policy()
     test_multimodal_prompt()
     test_cloud_artifacts()
+    test_repos_matching()
     test_repo_refs()
     test_activity_snippet()
     print("ALL SMOKE CHECKS PASSED")

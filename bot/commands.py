@@ -16,7 +16,7 @@ from bot.cloud_artifacts import deliver_new_cloud_artifacts
 from bot.multimodal import AgentPrompt, agent_prompt_from_message
 from bot.channel_bind import resolve_topic_channel, topic_from_channel
 from bot.projects import Project, set_channel_project_topic
-from bot.repo_refs import decode_repo_ref, encode_repo_ref
+from bot.repo_refs import decode_repo_ref, encode_repo_ref, repos_matching
 from bot.ui import RepoPickerView, controls_for, short_repo_label
 
 if TYPE_CHECKING:
@@ -30,6 +30,7 @@ DISCORD_CONTENT_MAX = 2000
 HELP_TEXT = """**Cursor**
 • `@Cursor …` or `/ask` to start (PNG/JPEG/GIF/WebP on the same message)
 • First repo pick pins the channel (`cursor-repo:…` in topic; needs Manage Channels here)
+• Repo picker: **Search** to filter; **Next** if you have many repos
 • Reply in the thread to steer · Cancel / Open PR on the card
 • Demo screenshots/videos from the agent land in the thread when a run finishes (`/artifacts` to retry)
 """
@@ -222,16 +223,9 @@ class AgentCog(commands.Cog):
         except Exception:  # noqa: BLE001
             logger.exception("repo autocomplete failed")
             return []
-        current_l = (current or "").lower()
         choices: list[app_commands.Choice[str]] = []
-        for url in urls:
+        for url in repos_matching(urls, current or ""):
             label = short_repo_label(url)
-            if (
-                current_l
-                and current_l not in label.lower()
-                and current_l not in url.lower()
-            ):
-                continue
             value = encode_repo_ref(url, self.bot.repo_ref_cache)
             choices.append(
                 app_commands.Choice(name=label[:100], value=value[:100])
@@ -603,7 +597,7 @@ class AgentCog(commands.Cog):
             channel=interaction.channel,
         )
         await interaction.followup.send(
-            f"Pick a repo for: **{_truncate_prompt(agent_prompt.display)}**",
+            view.message_content(),
             view=view,
             ephemeral=True,
         )
@@ -645,7 +639,7 @@ class AgentCog(commands.Cog):
             channel=message.channel,
         )
         await message.reply(
-            f"Pick a repo for: **{_truncate_prompt(agent_prompt.display)}**",
+            view.message_content(),
             view=view,
             mention_author=False,
         )
