@@ -130,6 +130,8 @@ jobs:
           PROJECTS_JSON: ${{ secrets.PROJECTS_JSON }}
           ALLOWED_USER_IDS: ${{ secrets.ALLOWED_USER_IDS }}
           ALLOWED_GUILD_IDS: ${{ secrets.ALLOWED_GUILD_IDS }}
+          SUPERUSER_IDS: ${{ secrets.SUPERUSER_IDS }}
+          CURSOR_ROLE_NAME: ${{ secrets.CURSOR_ROLE_NAME }}
           CURSOR_MODEL: ${{ secrets.CURSOR_MODEL }}
           DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
         run: |
@@ -145,6 +147,8 @@ jobs:
           for key in (
               "ALLOWED_USER_IDS",
               "ALLOWED_GUILD_IDS",
+              "SUPERUSER_IDS",
+              "CURSOR_ROLE_NAME",
               "CURSOR_MODEL",
               "DISCORD_GUILD_ID",
           ):

@@ -8,7 +8,6 @@ import discord
 from aiohttp import web
 from discord.ext import commands
 
-from bot.chat_ui import PendingRepoLaunch
 from bot.commands import AgentCog
 from bot.turn_coordinator import TurnCoordinator
 from bot.config import Settings, load_settings
@@ -45,8 +44,8 @@ class CursorDiscordBot(commands.Bot):
         self.repo_ref_cache: dict[str, str] = {}
         # Cloud agent artifact paths already posted to Discord (per bc- id).
         self.posted_artifacts: dict[str, set[str]] = {}
-        # (channel_id, user_id) → waiting for a repo name before launch.
-        self.pending_repo_launches: dict[tuple[int, int], PendingRepoLaunch] = {}
+        # Waiting for a chat reply with owner/repo (key: channel_id, user_id).
+        self.pending_repo_asks: dict[tuple[int, int], object] = {}
         self.turns = turns or TurnCoordinator()
         self._http_runner: web.AppRunner | None = None
 

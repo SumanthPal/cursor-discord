@@ -77,6 +77,9 @@ if command -v gh >/dev/null; then
   if [[ -n "${PROJECTS_JSON:-}" ]]; then
     gh secret set PROJECTS_JSON --body "${PROJECTS_JSON}"
   fi
+  if [[ -n "${SUPERUSER_IDS:-}" ]]; then
+    gh secret set SUPERUSER_IDS --body "${SUPERUSER_IDS}"
+  fi
   echo "  ok GitHub secrets (app + GCP_PROJECT)"
   echo "Still required once: GCP_SA_KEY (JSON for a deploy service account)."
 else

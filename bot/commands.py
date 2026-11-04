@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import discord
@@ -12,19 +14,28 @@ from bot.agent_ref import (
     is_agent_id,
     ref_spoiler,
 )
+from bot.channel_bind import (
+    pin_channel_repo,
+    resolve_topic_channel,
+    topic_from_channel,
+)
 from bot.chat_ui import (
     ChatStatusEditor,
-    PendingRepoLaunch,
     chat_ack,
     chat_failed,
     chat_status_body,
-    format_repo_choice_prompt,
-    resolve_repo_from_reply,
 )
 from bot.cloud_artifacts import deliver_new_cloud_artifacts
 from bot.multimodal import AgentPrompt, agent_prompt_from_message
-from bot.projects import Project, parse_channel_repo, set_channel_project_topic
-from bot.projects import set_channel_repo_topic as pin_channel_repo
+from bot.projects import (
+    Project,
+    compact_repo,
+    match_allowed_repo,
+    normalize_repo,
+    same_repo,
+    set_channel_project_topic,
+    split_repo_prefix,
+)
 from bot.repo_refs import decode_repo_ref, encode_repo_ref
 from bot.turn_coordinator import (
     AgentBusyError,
@@ -32,7 +43,7 @@ from bot.turn_coordinator import (
     chat_queue_ack,
     is_agent_busy_error,
 )
-from bot.ui import short_repo_label
+from bot.ui import SetupView, short_repo_label
 
 if TYPE_CHECKING:
     from bot.main import CursorDiscordBot
@@ -44,11 +55,53 @@ DISCORD_CONTENT_MAX = 2000
 
 HELP_TEXT = """**Cursor** — chat with a cloud coding agent
 • `@Cursor …` or `/ask` — say what you want (images on the same message work too)
+• Name the repo: `@Cursor owner/repo do the thing` (or a GitHub URL)
 • I branch a thread from your `@Cursor` message; keep talking there — I queue if I'm still busy
-• No repo set on the channel yet? I'll ask which one — reply with the number or name
+• If several repos are allowed here, I'll ask — reply with `owner/repo` or a URL
+• Works in channels an admin set up with `/setup`, on that channel's repos only
 • `/cancel` stops a run · PR links show up in my reply when one is opened
 • Demo screenshots/videos land in the thread when a run finishes (`/artifacts` to retry)
+
+**Admins** (`SUPERUSER_IDS`)
+• `/setup repos:owner/a,owner/b` binds this channel (`cursor-repo:…` in topic; needs Manage Channels)
+• `/grant @member` / `/revoke @member` toggles the **{role}** role (needs Manage Roles)
 """
+
+# How long we wait for a plain chat reply with owner/repo after asking.
+PENDING_REPO_TTL_SEC = 300
+
+ONBOARDING_TEXT = """**Thanks for adding Cursor.** Setup for admins (`SUPERUSER_IDS`):
+1. Create channels for Cursor work and run `/setup` in each to choose which repos it can touch.
+2. `/grant @member` gives someone the **{role}** role. They can use me in any set-up channel, on that channel's repos only.
+3. `/revoke @member` removes access.
+
+I need **Manage Channels** (repo bindings live in channel topics) and **Manage Roles** with my role above **{role}** (for `/grant`)."""
+
+OPEN_MODE_WARNING = (
+    "\n\n**Warning:** `SUPERUSER_IDS` isn't set, so everyone here is treated as an admin."
+)
+
+NOT_SET_UP = "This channel isn't set up for Cursor yet. Ask an admin to run `/setup` here."
+
+
+@dataclass(frozen=True)
+class RepoChoice:
+    """Need the user to name a repo from ``urls``; ``pin`` binds the channel."""
+
+    urls: list[str]
+    pin: bool
+
+
+@dataclass
+class PendingRepoAsk:
+    """Waiting for the user to reply with owner/repo or a GitHub URL."""
+
+    agent_prompt: AgentPrompt
+    choice: RepoChoice
+    owner_id: int
+    channel_id: int
+    expires_at: float
+    thread_anchor_message_id: int | None = None
 
 
 def clip_discord(text: str, limit: int = DISCORD_CONTENT_MAX) -> str:
@@ -118,7 +171,136 @@ class AgentCog(commands.Cog):
 
     @app_commands.command(name="help", description="How to use Cursor")
     async def help_cmd(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(HELP_TEXT, ephemeral=True)
+        await interaction.response.send_message(
+            HELP_TEXT.format(role=self.bot.settings.cursor_role_name), ephemeral=True
+        )
+
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        channel = guild.system_channel
+        if channel is None or not channel.permissions_for(guild.me).send_messages:
+            logger.info("joined %s (%s); no system channel to onboard", guild, guild.id)
+            return
+        text = ONBOARDING_TEXT.format(role=self.bot.settings.cursor_role_name)
+        if self.bot.policy.open_mode:
+            text += OPEN_MODE_WARNING
+        await channel.send(text)
+
+    @app_commands.command(
+        name="setup", description="Admin: choose which repos this channel can use"
+    )
+    @app_commands.describe(
+        repos="Comma-separated owner/repo list; omit to pick from a menu",
+        clear="Remove this channel's repo binding",
+    )
+    @app_commands.guild_only()
+    async def setup_cmd(
+        self,
+        interaction: discord.Interaction,
+        repos: str | None = None,
+        clear: bool = False,
+    ) -> None:
+        denied = self.bot.policy.check_guild(
+            interaction.guild
+        ) or self.bot.policy.check_admin(interaction.user)
+        if denied:
+            await interaction.response.send_message(denied, ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        if clear or repos:
+            urls = [normalize_repo(r) for r in (repos or "").split(",") if r.strip()]
+            note = await pin_channel_repo(
+                self.bot, interaction.channel, [] if clear else urls, force=True
+            )
+            await interaction.followup.send(note, ephemeral=True)
+            return
+
+        try:
+            urls = await self.bot.cursor.list_repos()
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(
+                f"Could not load Cursor repos: {exc}", ephemeral=True
+            )
+            return
+        if not urls:
+            await interaction.followup.send(
+                "No Cursor-connected repos. Link GitHub in the Cursor dashboard "
+                "for this API key, or pass `repos:` explicitly.",
+                ephemeral=True,
+            )
+            return
+        note = (
+            "Pick repos below, or re-run with text — "
+            "`/setup repos:owner/a,owner/b` (preferred when you have many)."
+        )
+        if len(urls) > 25:
+            note = (
+                f"Menu shows 25 of {len(urls)}. Prefer "
+                "`/setup repos:owner/a,owner/b` for the full set."
+            )
+        await interaction.followup.send(
+            note,
+            view=SetupView(
+                self.bot,
+                repo_urls=urls,
+                owner_id=interaction.user.id,
+                channel=interaction.channel,
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="grant", description="Admin: give a member Cursor access")
+    @app_commands.guild_only()
+    async def grant_cmd(
+        self, interaction: discord.Interaction, member: discord.Member
+    ) -> None:
+        await self._set_access(interaction, member, grant=True)
+
+    @app_commands.command(name="revoke", description="Admin: remove a member's Cursor access")
+    @app_commands.guild_only()
+    async def revoke_cmd(
+        self, interaction: discord.Interaction, member: discord.Member
+    ) -> None:
+        await self._set_access(interaction, member, grant=False)
+
+    async def _set_access(
+        self, interaction: discord.Interaction, member: discord.Member, *, grant: bool
+    ) -> None:
+        guild = interaction.guild
+        denied = self.bot.policy.check_guild(guild) or self.bot.policy.check_admin(
+            interaction.user
+        )
+        if denied or guild is None:
+            await interaction.response.send_message(
+                denied or "Server only.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        name = self.bot.settings.cursor_role_name
+        role = discord.utils.get(guild.roles, name=name)
+        try:
+            if grant:
+                if role is None:
+                    role = await guild.create_role(
+                        name=name, reason="Cursor bot access role"
+                    )
+                await member.add_roles(role, reason=f"/grant by {interaction.user}")
+            elif role is not None:
+                await member.remove_roles(role, reason=f"/revoke by {interaction.user}")
+        except discord.Forbidden:
+            await interaction.followup.send(
+                f"I need **Manage Roles**, and my role must be above **{name}**.",
+                ephemeral=True,
+            )
+            return
+        if grant:
+            msg = f"{member.mention} can now use Cursor in channels set up with `/setup`."
+        else:
+            msg = f"Removed Cursor access from {member.mention}."
+        if self.bot.policy.is_admin(member) and not grant:
+            msg += " (They're still an admin via `SUPERUSER_IDS`.)"
+        await interaction.followup.send(msg, ephemeral=True)
 
     @app_commands.command(
         name="artifacts",
@@ -208,24 +390,33 @@ class AgentCog(commands.Cog):
                 resolved_repo = decode_repo_ref(repo, self.bot.repo_ref_cache)
             except ValueError:
                 resolved_repo = repo
-        resolved = self._resolve_project(
-            project=None,
-            repo=resolved_repo,
-            branch=None,
-            channel=interaction.channel,
+        # Defer before channel fetch / list_repos — can exceed Discord's 3s window.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        plan = await self._plan_launch(
+            user=interaction.user, channel=interaction.channel, repo=resolved_repo
         )
-        if resolved is None:
-            await self._offer_repo_picker(
-                interaction=interaction,
+        if isinstance(plan, str):
+            await interaction.followup.send(plan, ephemeral=True)
+            return
+        if isinstance(plan, RepoChoice):
+            # Slash can't take a free-text reply on the same interaction — ask in-channel.
+            await self._ask_repo_in_channel(
+                channel=interaction.channel,
+                user=interaction.user,
                 agent_prompt=AgentPrompt.from_text(prompt),
-                branch=None,
+                choice=plan,
+            )
+            await interaction.followup.send(
+                "Reply in the channel with `owner/repo` or a GitHub URL "
+                "(or re-run `/ask` with the `repo:` option).",
+                ephemeral=True,
             )
             return
 
         await self._launch_new_agent(
             interaction=interaction,
             agent_prompt=AgentPrompt.from_text(prompt),
-            project=resolved,
+            project=plan,
             announce_channel=interaction.channel,
         )
 
@@ -234,7 +425,7 @@ class AgentCog(commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         try:
-            urls = await self.bot.cursor.list_repos()
+            urls = await self._visible_repos(interaction.user, interaction.channel)
         except Exception:  # noqa: BLE001
             logger.exception("repo autocomplete failed")
             return []
@@ -258,7 +449,7 @@ class AgentCog(commands.Cog):
 
     @app_commands.command(
         name="repos",
-        description="List GitHub repos connected to your Cursor API key",
+        description="List repos you can use here",
     )
     async def repos_cmd(self, interaction: discord.Interaction) -> None:
         denied = self.bot.policy.authorize(
@@ -268,8 +459,9 @@ class AgentCog(commands.Cog):
             await interaction.response.send_message(denied, ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
+        admin = self.bot.policy.is_admin(interaction.user)
         try:
-            urls = await self.bot.cursor.list_repos()
+            urls = await self._visible_repos(interaction.user, interaction.channel)
         except Exception as exc:  # noqa: BLE001
             await interaction.followup.send(
                 f"Could not list repos (is CURSOR_API_KEY valid / GitHub linked?): {exc}",
@@ -279,14 +471,21 @@ class AgentCog(commands.Cog):
         if not urls:
             await interaction.followup.send(
                 "No repos returned. Connect GitHub in the Cursor dashboard "
-                "for the account that owns this API key.",
+                "for the account that owns this API key."
+                if admin
+                else NOT_SET_UP,
                 ephemeral=True,
             )
             return
         # Compact labels only — full URLs blow past Discord's 2000-char content cap.
         lines = [f"• `{short_repo_label(u)}`" for u in urls]
+        header = (
+            f"**{len(urls)} Cursor-connected repo(s)**"
+            if admin
+            else f"**{len(urls)} repo(s) available in this channel**"
+        )
         pages = chunk_discord_lines(
-            f"**{len(urls)} Cursor-connected repo(s)**",
+            header,
             lines,
             footer="`@Cursor …` or `/ask` to start.",
         )
@@ -455,9 +654,9 @@ class AgentCog(commands.Cog):
     async def project_bind(
         self, interaction: discord.Interaction, alias: str
     ) -> None:
-        denied = self.bot.policy.authorize(
-            user=interaction.user, guild=interaction.guild
-        )
+        denied = self.bot.policy.check_guild(
+            interaction.guild
+        ) or self.bot.policy.check_admin(interaction.user)
         if denied:
             await interaction.response.send_message(denied, ephemeral=True)
             return
@@ -468,15 +667,18 @@ class AgentCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        channel = interaction.channel
-        if not isinstance(channel, discord.TextChannel):
+        channel = await resolve_topic_channel(self.bot, interaction.channel)
+        if channel is None:
             await interaction.response.send_message(
-                "Bind only works on text channels.", ephemeral=True
+                "Bind only works on text/forum channels.", ephemeral=True
             )
             return
-        if not channel.permissions_for(channel.guild.me).manage_channels:
+        me = channel.guild.me
+        if me is None or not channel.permissions_for(me).manage_channels:
             await interaction.response.send_message(
-                "I need **Manage Channels** to update the topic.", ephemeral=True
+                "I need **Manage Channels** on this channel "
+                "(check channel permission overwrites).",
+                ephemeral=True,
             )
             return
         new_topic = set_channel_project_topic(channel.topic, alias_l)
@@ -492,6 +694,10 @@ class AgentCog(commands.Cog):
         if message.author.bot:
             return
         if self.bot.user is None:
+            return
+
+        # Plain reply naming a repo after we asked "which repo?"
+        if await self._maybe_consume_repo_reply(message):
             return
 
         # Thread follow-ups to an existing agent
@@ -532,56 +738,13 @@ class AgentCog(commands.Cog):
                     )
                     return
 
-        pending_key = (message.channel.id, message.author.id)
-        pending = self.bot.pending_repo_launches.get(pending_key)
-        if pending is not None and isinstance(pending, PendingRepoLaunch):
-            if pending.owner_id != message.author.id:
-                return
-            denied = self.bot.policy.authorize(
-                user=message.author, guild=message.guild
-            )
-            if denied:
-                await message.reply(denied, mention_author=False)
-                return
-            picked = resolve_repo_from_reply(message.content, pending.urls)
-            if not picked:
-                await message.reply(
-                    "I didn't catch that — reply with the **number** from the list "
-                    "or a repo name like `org/repo`.",
-                    mention_author=False,
-                )
-                return
-            del self.bot.pending_repo_launches[pending_key]
-            await self._maybe_pin_channel_repo(message.channel, picked)
-            project = Project(
-                alias="_explicit",
-                repo=picked,
-                branch=(pending.branch or "").strip() or None,
-                model=self.bot.settings.cursor_model,
-            )
-            try:
-                anchor = await message.channel.fetch_message(
-                    pending.thread_anchor_message_id
-                )
-            except discord.NotFound:
-                await message.reply(
-                    "Couldn't find the original ask — `@Cursor` again to restart.",
-                    mention_author=False,
-                )
-                return
-            await self._launch_new_agent_from_message(
-                message=message,
-                agent_prompt=pending.agent_prompt,  # type: ignore[arg-type]
-                project=project,
-                thread_anchor=anchor,
-            )
-            return
-
         if self.bot.user not in message.mentions:
             return
         prompt_text = _strip_mention(message.content, self.bot.user)
+        # `@Cursor owner/repo do the thing` — peel repo off the front.
+        inline_repo, prompt_text = split_repo_prefix(prompt_text)
         agent_prompt = await agent_prompt_from_message(message, text=prompt_text)
-        if not agent_prompt.has_content:
+        if not agent_prompt.has_content and not inline_repo:
             if agent_prompt.feedback:
                 await message.reply(
                     clip_discord(agent_prompt.feedback),
@@ -589,9 +752,16 @@ class AgentCog(commands.Cog):
                 )
             else:
                 await message.reply(
-                    "`@Cursor <what to do>` (images can be attached) or `/ask`",
+                    "`@Cursor <what to do>` or `@Cursor owner/repo <what to do>`",
                     mention_author=False,
                 )
+            return
+        if not agent_prompt.has_content and inline_repo:
+            await message.reply(
+                f"Got `{compact_repo(inline_repo)}` — add what you want done "
+                f"(e.g. `@Cursor {compact_repo(inline_repo)} fix the flaky test`).",
+                mention_author=False,
+            )
             return
 
         denied = self.bot.policy.authorize(user=message.author, guild=message.guild)
@@ -599,146 +769,241 @@ class AgentCog(commands.Cog):
             await message.reply(denied, mention_author=False)
             return
 
-        resolved = self._resolve_project(
-            project=None,
-            repo=None,
-            branch=None,
-            channel=message.channel,
+        # Fresh @Cursor cancels any outstanding "which repo?" wait.
+        self._clear_pending_repo(message.channel.id, message.author.id)
+
+        plan = await self._plan_launch(
+            user=message.author, channel=message.channel, repo=inline_repo
         )
-        if resolved is None:
-            await self._offer_repo_picker_message(
-                message=message, agent_prompt=agent_prompt
-            )
+        if isinstance(plan, str):
+            await message.reply(plan, mention_author=False)
             return
-
-        await self._launch_new_agent_from_message(
-            message=message, agent_prompt=agent_prompt, project=resolved
-        )
-
-    async def _offer_repo_picker(
-        self,
-        *,
-        interaction: discord.Interaction,
-        agent_prompt: AgentPrompt,
-        branch: str | None,
-    ) -> None:
-        # Defer before list_repos — Cursor API can exceed Discord's 3s window.
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            urls = await self.bot.cursor.list_repos()
-        except Exception as exc:  # noqa: BLE001
-            await interaction.followup.send(
-                f"Could not load Cursor repos: {exc}",
-                ephemeral=True,
-            )
-            return
-        if not urls:
-            await interaction.followup.send(
-                "No Cursor-connected repos found. Link GitHub in the Cursor "
-                "dashboard for this API key, or pass `repo:` on `/ask`.",
-                ephemeral=True,
-            )
-            return
-
-        channel = interaction.channel
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            await interaction.followup.send(
-                "Need a text channel to chat.", ephemeral=True
-            )
-            return
-
-        prompt_text = format_repo_choice_prompt(
-            urls, task_preview=agent_prompt.display
-        )
-        posted = await channel.send(prompt_text)
-        self.bot.pending_repo_launches[(channel.id, interaction.user.id)] = (
-            PendingRepoLaunch(
+        if isinstance(plan, RepoChoice):
+            await self._ask_repo_in_channel(
+                channel=message.channel,
+                user=message.author,
                 agent_prompt=agent_prompt,
-                urls=urls,
-                branch=branch,
-                owner_id=interaction.user.id,
-                channel_id=channel.id,
-                thread_anchor_message_id=posted.id,
-            )
-        )
-        await _clear_deferred_thinking(interaction, posted)
-
-    async def _offer_repo_picker_message(
-        self, *, message: discord.Message, agent_prompt: AgentPrompt
-    ) -> None:
-        try:
-            urls = await self.bot.cursor.list_repos()
-        except Exception as exc:  # noqa: BLE001
-            await message.reply(
-                f"Could not load Cursor repos: `{exc}`", mention_author=False
-            )
-            return
-        if not urls:
-            await message.reply(
-                "No Cursor-connected repos. Link GitHub in Cursor, or `/ask` + `repo:`.",
-                mention_author=False,
-            )
-            return
-
-        self.bot.pending_repo_launches[(message.channel.id, message.author.id)] = (
-            PendingRepoLaunch(
-                agent_prompt=agent_prompt,
-                urls=urls,
-                branch=None,
-                owner_id=message.author.id,
-                channel_id=message.channel.id,
+                choice=plan,
                 thread_anchor_message_id=message.id,
             )
-        )
-        await message.reply(
-            format_repo_choice_prompt(urls, task_preview=agent_prompt.display),
-            mention_author=False,
-        )
+            return
 
-    async def _maybe_pin_channel_repo(
-        self, channel: discord.abc.Messageable, repo_url: str
-    ) -> None:
-        topic_channel = channel
-        if isinstance(channel, discord.Thread) and isinstance(
-            channel.parent, discord.TextChannel
+        # Admin named a repo in an unbound channel — pin it like the old first-pick.
+        if (
+            inline_repo
+            and self.bot.policy.is_admin(message.author)
+            and not await self._channel_projects(message.channel)
         ):
-            topic_channel = channel.parent
-        if not isinstance(topic_channel, discord.TextChannel):
-            return
-        if parse_channel_repo(topic_channel.topic):
-            return
-        if not topic_channel.permissions_for(topic_channel.guild.me).manage_channels:
-            return
-        try:
-            await topic_channel.edit(
-                topic=pin_channel_repo(topic_channel.topic, repo_url)
+            pin_note = await pin_channel_repo(
+                self.bot, message.channel, [plan.repo]
             )
-        except discord.HTTPException:
-            logger.warning("channel repo pin failed", exc_info=True)
+            await message.reply(pin_note, mention_author=False)
 
-    def _resolve_project(
+        await self._launch_new_agent_from_message(
+            message=message, agent_prompt=agent_prompt, project=plan
+        )
+
+    async def _channel_projects(
+        self, channel: discord.abc.Messageable | None
+    ) -> list[Project]:
+        topic_channel = await resolve_topic_channel(self.bot, channel)
+        return self.bot.registry.channel_projects(
+            topic_from_channel(topic_channel), self.bot.settings.cursor_model
+        )
+
+    async def _visible_repos(
+        self, user: discord.abc.User, channel: discord.abc.Messageable | None
+    ) -> list[str]:
+        """Admins see every repo on the API key; members only this channel's."""
+        if self.bot.policy.is_admin(user):
+            return await self.bot.cursor.list_repos()
+        return [p.repo for p in await self._channel_projects(channel)]
+
+    async def _plan_launch(
         self,
         *,
-        project: str | None,
-        repo: str | None,
-        branch: str | None,
+        user: discord.abc.User,
         channel: discord.abc.Messageable | None,
-    ) -> Project | None:
-        topic = None
-        if isinstance(channel, discord.TextChannel):
-            topic = channel.topic
-        elif isinstance(channel, discord.Thread) and isinstance(
-            channel.parent, discord.TextChannel
-        ):
-            topic = channel.parent.topic
-        return self.bot.registry.resolve(
-            project=project,
-            repo=repo,
-            branch=branch,
-            channel_topic=topic,
-            default_model=self.bot.settings.cursor_model,
+        repo: str | None,
+    ) -> Project | RepoChoice | str:
+        """Project to launch, a picker to show, or a user-facing refusal."""
+        bound = await self._channel_projects(channel)
+        admin = self.bot.policy.is_admin(user)
+        model = self.bot.settings.cursor_model
+
+        if repo:
+            allowed_urls = [p.repo for p in bound]
+            if admin and not allowed_urls:
+                try:
+                    allowed_urls = await self.bot.cursor.list_repos()
+                except Exception as exc:  # noqa: BLE001
+                    return f"Could not load Cursor repos: {exc}"
+            matched = match_allowed_repo(repo, allowed_urls) if allowed_urls else None
+            if matched:
+                return Project(alias="_explicit", repo=matched, model=model)
+            if admin and not bound:
+                # Admin typed a repo that isn't on the API key — still try exact URL.
+                return Project(
+                    alias="_explicit", repo=normalize_repo(repo), model=model
+                )
+            if not bound:
+                return NOT_SET_UP
+            allowed = ", ".join(f"`{compact_repo(p.repo)}`" for p in bound)
+            return (
+                f"`{compact_repo(repo)}` isn't allowed in this channel. "
+                f"Allowed: {allowed}"
+            )
+
+        if len(bound) == 1:
+            return bound[0]
+        if bound:
+            return RepoChoice(urls=[p.repo for p in bound], pin=False)
+        if not admin:
+            return NOT_SET_UP
+
+        fallback = self.bot.registry.resolve(default_model=model)
+        if fallback:
+            return fallback
+        try:
+            urls = await self.bot.cursor.list_repos()
+        except Exception as exc:  # noqa: BLE001
+            return f"Could not load Cursor repos: {exc}"
+        if not urls:
+            return (
+                "No Cursor-connected repos. Link GitHub in the Cursor dashboard "
+                "for this API key, or pass `repo:` explicitly."
+            )
+        return RepoChoice(urls=urls, pin=True)
+
+    def _pending_key(
+        self, channel_id: int, user_id: int
+    ) -> tuple[int, int]:
+        return (channel_id, user_id)
+
+    def _clear_pending_repo(self, channel_id: int, user_id: int) -> None:
+        self.bot.pending_repo_asks.pop(
+            self._pending_key(channel_id, user_id), None
         )
+
+    def _get_pending_repo(
+        self, channel_id: int, user_id: int
+    ) -> PendingRepoAsk | None:
+        key = self._pending_key(channel_id, user_id)
+        pending = self.bot.pending_repo_asks.get(key)
+        if not isinstance(pending, PendingRepoAsk):
+            return None
+        if time.monotonic() > pending.expires_at:
+            self.bot.pending_repo_asks.pop(key, None)
+            return None
+        return pending
+
+    async def _ask_repo_in_channel(
+        self,
+        *,
+        channel: discord.abc.Messageable | None,
+        user: discord.abc.User,
+        agent_prompt: AgentPrompt,
+        choice: RepoChoice,
+        thread_anchor_message_id: int | None = None,
+    ) -> None:
+        if channel is None or not hasattr(channel, "id"):
+            return
+        channel_id = int(channel.id)
+        labels = [compact_repo(u) for u in choice.urls]
+        lines = [
+            f"Which repo for: **{_truncate_prompt(agent_prompt.display)}**?",
+            "Reply with `owner/repo` or a GitHub URL.",
+        ]
+        if len(labels) <= 12:
+            lines.append("Allowed: " + ", ".join(f"`{x}`" for x in labels))
+        else:
+            lines.append(
+                f"{len(labels)} repos available — `/repos` to list, or type a name fragment."
+            )
+        posted = await channel.send("\n".join(lines))
+        anchor_id = thread_anchor_message_id or getattr(posted, "id", None)
+        self.bot.pending_repo_asks[self._pending_key(channel_id, user.id)] = (
+            PendingRepoAsk(
+                agent_prompt=agent_prompt,
+                choice=choice,
+                owner_id=user.id,
+                channel_id=channel_id,
+                expires_at=time.monotonic() + PENDING_REPO_TTL_SEC,
+                thread_anchor_message_id=anchor_id,
+            )
+        )
+
+    async def _maybe_consume_repo_reply(self, message: discord.Message) -> bool:
+        """If this message answers a pending repo ask, launch (or explain) and return True."""
+        if self.bot.user in message.mentions:
+            return False  # handled as a fresh @Cursor below
+        pending = self._get_pending_repo(message.channel.id, message.author.id)
+        if pending is None:
+            return False
+
+        typed = (message.content or "").strip()
+        if not typed or typed.startswith("/"):
+            return False
+
+        # Whole message should be a repo ref (optional leading peel).
+        peeled, rest = split_repo_prefix(typed)
+        if peeled and rest:
+            # Looks like "owner/repo do stuff" — treat as cancel + they should @Cursor.
+            return False
+        candidate = peeled or typed.strip().strip("`")
+        matched = match_allowed_repo(candidate, pending.choice.urls)
+        if matched is None:
+            # Only claim the message if it looks like they tried to name a repo.
+            if peeled or ("/" in candidate and " " not in candidate):
+                allowed = ", ".join(
+                    f"`{compact_repo(u)}`" for u in pending.choice.urls[:12]
+                )
+                extra = "" if len(pending.choice.urls) <= 12 else " …"
+                await message.reply(
+                    f"`{compact_repo(candidate)}` isn't available here. "
+                    f"Try one of: {allowed}{extra}",
+                    mention_author=False,
+                )
+                return True
+            return False
+
+        self._clear_pending_repo(message.channel.id, message.author.id)
+        denied = self.bot.policy.authorize(
+            user=message.author, guild=message.guild
+        )
+        if denied:
+            await message.reply(denied, mention_author=False)
+            return True
+
+        if pending.choice.pin:
+            pin_note = await pin_channel_repo(
+                self.bot, message.channel, [matched]
+            )
+            await message.reply(pin_note, mention_author=False)
+
+        project = Project(
+            alias="_explicit",
+            repo=matched,
+            model=self.bot.settings.cursor_model,
+        )
+        thread_anchor: discord.Message | None = None
+        if pending.thread_anchor_message_id:
+            try:
+                thread_anchor = await message.channel.fetch_message(
+                    pending.thread_anchor_message_id
+                )
+            except discord.NotFound:
+                logger.warning(
+                    "repo reply anchor missing (id=%s)",
+                    pending.thread_anchor_message_id,
+                )
+        await self._launch_new_agent_from_message(
+            message=message,
+            agent_prompt=pending.agent_prompt,
+            project=project,
+            thread_anchor=thread_anchor,
+        )
+        return True
 
     async def _launch_new_agent(
         self,

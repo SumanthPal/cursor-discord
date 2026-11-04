@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 import discord
 
 from bot.agent_ref import is_agent_id
-from bot.multimodal import AgentPrompt
-from bot.projects import Project, parse_channel_repo, set_channel_repo_topic
+from bot.channel_bind import pin_channel_repo
 from bot.repo_refs import DISCORD_VALUE_MAX, repo_path
 
 if TYPE_CHECKING:
     from bot.main import CursorDiscordBot
 
 logger = logging.getLogger(__name__)
-
-OnRepoPicked = Callable[[discord.Interaction, Project], Awaitable[None]]
 
 
 def short_repo_label(url: str) -> str:
@@ -32,108 +28,49 @@ def _desc(url: str) -> str:
     return url[: DISCORD_VALUE_MAX - 1] + "…"
 
 
-class RepoPickerView(discord.ui.View):
-    """Pick a Cursor-connected repo. First pick can silently pin the channel topic."""
+class SetupView(discord.ui.View):
+    """Admin multi-select: bind this channel to one or more repos."""
 
     def __init__(
         self,
         bot: CursorDiscordBot,
         *,
-        prompt: AgentPrompt,
         repo_urls: list[str],
-        branch: str | None,
-        on_picked: OnRepoPicked,
         owner_id: int,
-        channel: discord.abc.Messageable | None = None,
+        channel: discord.abc.Messageable | None,
     ) -> None:
         super().__init__(timeout=300)
         self.bot = bot
-        self.prompt = prompt
-        self.branch = branch
-        self.on_picked = on_picked
         self.owner_id = owner_id
-        self.channel = _topic_channel(channel)
+        self.channel = channel
         self._urls = [u.rstrip("/") for u in repo_urls[:25]]
-
-        options: list[discord.SelectOption] = []
-        for i, url in enumerate(self._urls):
-            options.append(
-                discord.SelectOption(
-                    label=short_repo_label(url),
-                    value=str(i),
-                    description=_desc(url),
-                )
-            )
         select = discord.ui.Select(
-            placeholder="Choose a repo…",
-            options=options,
+            placeholder="Repos allowed in this channel…",
+            options=[
+                discord.SelectOption(
+                    label=short_repo_label(url), value=str(i), description=_desc(url)
+                )
+                for i, url in enumerate(self._urls)
+            ],
             min_values=1,
-            max_values=1,
+            max_values=len(self._urls),
         )
         select.callback = self._picked  # type: ignore[method-assign]
         self.add_item(select)
 
     async def _picked(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.owner_id:
+        denied = self.bot.policy.check_admin(interaction.user)
+        if denied or interaction.user.id != self.owner_id:
             await interaction.response.send_message(
-                "Only the person who started this can pick a repo.",
-                ephemeral=True,
+                denied or "Only the person who ran /setup can pick.", ephemeral=True
             )
             return
-        denied = self.bot.policy.authorize(
-            user=interaction.user, guild=interaction.guild
-        )
-        if denied:
-            await interaction.response.send_message(denied, ephemeral=True)
-            return
-
         assert isinstance(self.children[0], discord.ui.Select)
-        key = self.children[0].values[0]
-        try:
-            url = self._urls[int(key)]
-        except (ValueError, IndexError) as exc:
-            await interaction.response.send_message(
-                f"Invalid repo selection: {exc}", ephemeral=True
-            )
-            return
-
-        # Ack first — topic edit can exceed Discord's 3s interaction window.
+        urls = [self._urls[int(v)] for v in self.children[0].values]
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await self._maybe_pin(url)
-
-        project = Project(
-            alias="_explicit",
-            repo=url,
-            branch=(self.branch or "").strip() or None,
-            model=self.bot.settings.cursor_model,
-        )
+        note = await pin_channel_repo(self.bot, self.channel, urls, force=True)
         self.stop()
-        await self.on_picked(interaction, project)
-
-    async def _maybe_pin(self, repo_url: str) -> None:
-        """If channel has no cursor-repo yet and we can edit topics, pin silently."""
-        channel = self.channel
-        if channel is None or parse_channel_repo(channel.topic):
-            return
-        if not channel.permissions_for(channel.guild.me).manage_channels:
-            return
-        try:
-            await channel.edit(topic=set_channel_repo_topic(channel.topic, repo_url))
-        except discord.HTTPException:
-            logger.warning("silent channel repo pin failed", exc_info=True)
-
-
-def _topic_channel(
-    channel: discord.abc.Messageable | None,
-) -> discord.TextChannel | None:
-    """Channel whose topic we pin — parent text channel when started from a thread."""
-    if isinstance(channel, discord.TextChannel):
-        return channel
-    if isinstance(channel, discord.Thread) and isinstance(
-        channel.parent, discord.TextChannel
-    ):
-        return channel.parent
-    return None
+        await interaction.followup.send(note, ephemeral=True)
 
 
 class AgentControls(discord.ui.View):
