@@ -116,6 +116,12 @@ def build_bot(settings: Settings | None = None) -> CursorDiscordBot:
         len(registry.projects),
         registry.default,
     )
+    app_id = settings.discord_client_id
+    logger.info(
+        "Discord app id %s — invite: https://discord.com/oauth2/authorize?client_id=%s&permissions=67648&scope=bot%%20applications.commands",
+        app_id,
+        app_id,
+    )
     policy = Policy(settings)
     cursor = CursorAgentService(
         api_key=settings.cursor_api_key,

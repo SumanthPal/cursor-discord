@@ -102,7 +102,8 @@ async def agent_prompt_from_message(
 
     owns_session = session is None
     if owns_session:
-        session = aiohttp.ClientSession()
+        timeout = aiohttp.ClientTimeout(total=60, connect=15, sock_read=45)
+        session = aiohttp.ClientSession(timeout=timeout)
 
     try:
         for attachment in message.attachments:

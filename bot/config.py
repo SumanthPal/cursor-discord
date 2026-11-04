@@ -14,7 +14,12 @@ def _csv_ids(raw: str | None) -> frozenset[int]:
         part = part.strip()
         if not part:
             continue
-        out.add(int(part))
+        try:
+            out.add(int(part))
+        except ValueError as exc:
+            raise SystemExit(
+                f"Invalid integer in allowlist env (expected comma-separated ids): {part!r}"
+            ) from exc
     return frozenset(out)
 
 
@@ -49,7 +54,14 @@ def load_settings() -> Settings:
         raise SystemExit("CURSOR_API_KEY is required")
 
     guild_raw = os.environ.get("DISCORD_GUILD_ID", "").strip()
-    discord_guild_id = int(guild_raw) if guild_raw else None
+    discord_guild_id: int | None = None
+    if guild_raw:
+        try:
+            discord_guild_id = int(guild_raw)
+        except ValueError as exc:
+            raise SystemExit(
+                f"DISCORD_GUILD_ID must be a numeric snowflake, got {guild_raw!r}"
+            ) from exc
 
     return Settings(
         discord_token=discord_token,

@@ -16,7 +16,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install package
-        run: pip install -e .
+        run: pip install -e ".[dev]"
+
+      - name: Ruff
+        run: ruff check bot scripts
 
       - name: Smoke checks
         run: python scripts/smoke_check.py

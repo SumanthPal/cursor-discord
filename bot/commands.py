@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from bot.agent_ref import (
     build_starter_embed,
+    chat_failed,
     find_agent_ref_in_channel,
     is_agent_id,
 )
@@ -16,6 +17,7 @@ from bot.cloud_artifacts import deliver_new_cloud_artifacts
 from bot.multimodal import AgentPrompt, agent_prompt_from_message
 from bot.projects import Project, set_channel_project_topic
 from bot.repo_refs import decode_repo_ref, encode_repo_ref
+from bot.status_card import build_run_status_card, edit_status_card
 from bot.ui import RepoPickerView, controls_for, short_repo_label
 
 if TYPE_CHECKING:
@@ -30,7 +32,7 @@ HELP_TEXT = """**Cursor**
 • `@Cursor …` or `/ask` to start (PNG/JPEG/GIF/WebP on the same message)
 • First repo pick pins the channel (`cursor-repo:…` in topic)
 • Reply in the thread to steer · Cancel / Open PR on the card
-• Demo screenshots/videos from the agent land in the thread when a run finishes (`/artifacts` to retry)
+• Demo screenshots/videos land in the thread when a run finishes (`/artifacts` to retry)
 """
 
 
@@ -151,15 +153,21 @@ class AgentCog(commands.Cog):
             return
 
         posted = self.bot.posted_artifacts.setdefault(resolved_id, set())
-        count = await deliver_new_cloud_artifacts(
+        result = await deliver_new_cloud_artifacts(
             thread=channel,
             cursor=self.bot.cursor,
             agent_id=resolved_id,
             posted=posted,
         )
-        if count:
+        if result.list_failed:
             await interaction.followup.send(
-                f"Posted {count} artifact(s) to the thread.", ephemeral=True
+                "Could not fetch artifacts from the agent API (see thread).",
+                ephemeral=True,
+            )
+        elif result.delivered:
+            await interaction.followup.send(
+                f"Posted {result.delivered} artifact(s) to the thread.",
+                ephemeral=True,
             )
         else:
             await interaction.followup.send(
@@ -758,37 +766,22 @@ class AgentCog(commands.Cog):
         project: Project,
     ) -> None:
         embed = status_message.embeds[0] if status_message.embeds else None
+        project_label = display_project_alias(project.alias)
 
         async def on_status(state: str, data: dict) -> None:
             nonlocal embed
             if embed is None:
                 return
-            agent_id = data.get("agent_id") or "pending"
-            summary = data.get("snippet") or data.get("result")
-            if data.get("error"):
-                state = "error"
-                summary = str(data["error"])
-            embed = build_starter_embed(
-                agent_id=agent_id,
+            embed, view = build_run_status_card(
+                bot=self.bot,
+                agent_id=str(data.get("agent_id") or "pending"),
                 prompt=agent_prompt.display,
-                project=display_project_alias(project.alias),
+                project_alias=project_label,
                 repo=project.repo,
-                status=state,
-                run_id=data.get("run_id"),
-                summary=summary,
-                pr_url=data.get("pr_url"),
-                branch=data.get("branch"),
+                state=state,
+                data=data,
             )
-            view = controls_for(
-                self.bot,
-                agent_id=agent_id,
-                status=state,
-                pr_url=data.get("pr_url"),
-            )
-            try:
-                await status_message.edit(embed=embed, view=view)
-            except discord.HTTPException:
-                logger.warning("failed to edit status message", exc_info=True)
+            await edit_status_card(status_message, embed=embed, view=view)
 
         try:
             outcome = await self.bot.cursor.create_and_run(
@@ -805,13 +798,13 @@ class AgentCog(commands.Cog):
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("create_and_run failed")
-            await thread.send(f"Agent failed to start: `{exc}`")
+            await thread.send(chat_failed(exc))
             return
 
         embed = build_starter_embed(
             agent_id=outcome.agent_id,
             prompt=agent_prompt.display,
-            project=display_project_alias(project.alias),
+            project=project_label,
             repo=project.repo,
             status=outcome.status,
             summary=outcome.result_text or outcome.error_message,
@@ -825,9 +818,9 @@ class AgentCog(commands.Cog):
             status=outcome.status,
             pr_url=outcome.pr_url,
         )
-        try:
-            await status_message.edit(embed=embed, view=view)
-        except discord.HTTPException:
+        if not await edit_status_card(
+            status_message, embed=embed, view=view, force=True
+        ):
             await thread.send(embed=embed, view=view)
 
         bits = [f"**{outcome.status.title()}.** `{outcome.agent_id}` — reply to continue."]
@@ -918,30 +911,16 @@ class AgentCog(commands.Cog):
 
         async def on_status(state: str, data: dict) -> None:
             nonlocal embed
-            summary = data.get("snippet") or data.get("result") or data.get("error")
-            if data.get("error"):
-                state = "error"
-            embed = build_starter_embed(
+            embed, view = build_run_status_card(
+                bot=self.bot,
                 agent_id=agent_id,
                 prompt=agent_prompt.display,
-                project=project_alias,
+                project_alias=project_alias,
                 repo=repo,
-                status=state,
-                summary=summary,
-                run_id=data.get("run_id"),
-                pr_url=data.get("pr_url"),
-                branch=data.get("branch"),
+                state=state,
+                data=data,
             )
-            view = controls_for(
-                self.bot,
-                agent_id=agent_id,
-                status=state,
-                pr_url=data.get("pr_url"),
-            )
-            try:
-                await status_message.edit(embed=embed, view=view)
-            except discord.HTTPException:
-                pass
+            await edit_status_card(status_message, embed=embed, view=view)
 
         try:
             outcome = await self.bot.cursor.follow_up(
@@ -952,7 +931,7 @@ class AgentCog(commands.Cog):
         except Exception as exc:  # noqa: BLE001
             logger.exception("follow_up failed")
             await status_message.reply(
-                f"Follow-up failed: `{exc}`", mention_author=False
+                chat_failed(exc), mention_author=False
             )
             return
 
@@ -973,10 +952,7 @@ class AgentCog(commands.Cog):
             status=outcome.status,
             pr_url=outcome.pr_url,
         )
-        try:
-            await status_message.edit(embed=embed, view=view)
-        except discord.HTTPException:
-            pass
+        await edit_status_card(status_message, embed=embed, view=view, force=True)
 
         channel = status_message.channel
         if isinstance(channel, discord.Thread):
@@ -1027,7 +1003,3 @@ async def _clear_deferred_thinking(
         )
     except discord.HTTPException:
         logger.debug("could not ack deferred interaction", exc_info=True)
-
-
-async def setup(bot: CursorDiscordBot) -> None:
-    await bot.add_cog(AgentCog(bot))

@@ -16,6 +16,17 @@ python -m bot
 
 Or `docker compose up --build`.
 
+### Checks
+
+```bash
+pip install -e ".[dev]"
+ruff check bot scripts
+python scripts/smoke_check.py
+python scripts/verify_multimodal.py
+```
+
+(Same smoke steps run in [.github/workflows/ci.yml](.github/workflows/ci.yml). Deploy to Cloud Run runs only after CI succeeds on `main`.)
+
 ## Cloud Run
 
 Push to `main` (or `workflow_dispatch`) runs [.github/workflows/deploy-cloudrun.yml](.github/workflows/deploy-cloudrun.yml): build → Secret Manager → Cloud Run (`min=1`, no CPU throttling).

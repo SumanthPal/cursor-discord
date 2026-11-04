@@ -141,7 +141,9 @@ class CursorAgentService:
         items = await self.client.list_repositories(api_key=self.api_key)
         urls: list[str] = []
         for item in items:
-            url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+            url = getattr(item, "url", None)
+            if url is None and isinstance(item, dict):
+                url = item.get("url")
             if url:
                 urls.append(str(url).rstrip("/"))
         # Stable, de-duped

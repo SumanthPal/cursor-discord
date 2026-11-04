@@ -145,20 +145,22 @@ async def verify_artifact_delivery() -> None:
     posted: set[str] = set()
     agent_id = "bc-00000000-0000-0000-0000-000000000001"
 
-    count = await deliver_new_cloud_artifacts(
+    result = await deliver_new_cloud_artifacts(
         thread=thread,
         cursor=cursor,  # type: ignore[arg-type]
         agent_id=agent_id,
         posted=posted,
     )
-    assert count == 2, count
+    assert result.delivered == 2, result.delivered
     assert len(thread.sends) >= 1
     all_files = [n for s in thread.sends for n in s.filenames]
     assert "demo.png" in all_files
     assert "recording_demo.mp4" in all_files
     fp_png = artifact_fingerprint(cursor.artifacts[0])
     assert fp_png in posted
-    print(f"PASS delivered {count} artifacts to fake thread ({len(all_files)} files)")
+    print(
+        f"PASS delivered {result.delivered} artifacts to fake thread ({len(all_files)} files)"
+    )
 
     thread2 = FakeThread()
     again = await deliver_new_cloud_artifacts(
@@ -167,7 +169,7 @@ async def verify_artifact_delivery() -> None:
         agent_id=agent_id,
         posted=posted,
     )
-    assert again == 0
+    assert again.delivered == 0
     assert len(thread2.sends) == 0
     print("PASS dedupe: second delivery skipped already-posted artifacts")
 
@@ -200,7 +202,7 @@ async def verify_artifact_retry_after_upload_failure() -> None:
         agent_id=agent_id,
         posted=posted,
     )
-    assert first == 0
+    assert first.delivered == 0
     assert not posted
     second = await deliver_new_cloud_artifacts(
         thread=thread,
@@ -208,7 +210,7 @@ async def verify_artifact_retry_after_upload_failure() -> None:
         agent_id=agent_id,
         posted=posted,
     )
-    assert second == 2
+    assert second.delivered == 2
     print("PASS artifact retry after failed Discord upload")
 
 

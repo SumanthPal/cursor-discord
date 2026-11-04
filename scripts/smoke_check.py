@@ -176,9 +176,10 @@ def test_policy() -> None:
 
 
 def test_imports() -> None:
-    import bot.main  # noqa: F401
-    import bot.cursor_agent  # noqa: F401
     import bot.commands  # noqa: F401
+    import bot.cursor_agent  # noqa: F401
+    import bot.main  # noqa: F401
+    import bot.status_card  # noqa: F401
     print("ok imports")
 
 

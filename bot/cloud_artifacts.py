@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import logging
 import mimetypes
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -19,6 +20,13 @@ logger = logging.getLogger(__name__)
 DISCORD_MAX_UPLOAD = 25 * 1024 * 1024
 # Cap files pulled per delivery pass (avoid huge threads).
 MAX_ARTIFACTS_PER_DELIVERY = 20
+
+
+@dataclass(frozen=True)
+class ArtifactDeliveryResult:
+    delivered: int
+    list_failed: bool = False
+
 
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
 _VIDEO_SUFFIXES = frozenset({".mp4", ".webm", ".mov", ".m4v"})
@@ -60,13 +68,19 @@ async def deliver_new_cloud_artifacts(
     cursor: CursorAgentService,
     agent_id: str,
     posted: set[str],
-) -> int:
-    """Download and upload artifacts not yet posted for this agent. Returns count sent."""
+) -> ArtifactDeliveryResult:
+    """Download and upload artifacts not yet posted for this agent."""
     try:
         items = await cursor.list_artifacts(agent_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("list_artifacts failed for %s: %s", agent_id, exc)
-        return 0
+        try:
+            await thread.send(
+                f"Could not list agent artifacts (API error). Try again later.\n`{exc}`"
+            )
+        except discord.HTTPException:
+            logger.warning("could not notify thread about list_artifacts failure")
+        return ArtifactDeliveryResult(delivered=0, list_failed=True)
 
     pending = [
         item
@@ -76,7 +90,7 @@ async def deliver_new_cloud_artifacts(
     ]
     pending.sort(key=lambda a: a.path)
     if not pending:
-        return 0
+        return ArtifactDeliveryResult(delivered=0)
 
     pending = pending[:MAX_ARTIFACTS_PER_DELIVERY]
 
@@ -162,4 +176,4 @@ async def deliver_new_cloud_artifacts(
     delivered += len(done)
     posted.update(done)
 
-    return delivered
+    return ArtifactDeliveryResult(delivered=delivered)
