@@ -6,6 +6,8 @@ Discord → [Cursor cloud agents](https://cursor.com/docs/cloud-agent/api/endpoi
 
 First repo pick writes `cursor-repo:owner/repo` into the **channel topic** (survives deploys — CI never touches Discord). Needs **Manage Channels** *on that channel* (invite bit isn't enough if the channel/category denies it). Clippy now reports pin success/failure after each pick. Override anytime with `/ask` + `repo:`, or set the topic marker by hand.
 
+When the repo picker appears, use **Search** to filter by owner or repo name (Discord’s dropdown only shows 25 at a time; **Next** pages through the rest).
+
 ## Local
 
 ```bash
