@@ -14,6 +14,7 @@ from bot.agent_ref import (
 )
 from bot.cloud_artifacts import deliver_new_cloud_artifacts
 from bot.multimodal import AgentPrompt, agent_prompt_from_message
+from bot.channel_bind import resolve_topic_channel, topic_from_channel
 from bot.projects import Project, set_channel_project_topic
 from bot.repo_refs import decode_repo_ref, encode_repo_ref
 from bot.ui import RepoPickerView, controls_for, short_repo_label
@@ -28,7 +29,7 @@ DISCORD_CONTENT_MAX = 2000
 
 HELP_TEXT = """**Cursor**
 • `@Cursor …` or `/ask` to start (PNG/JPEG/GIF/WebP on the same message)
-• First repo pick pins the channel (`cursor-repo:…` in topic)
+• First repo pick pins the channel (`cursor-repo:…` in topic; needs Manage Channels here)
 • Reply in the thread to steer · Cancel / Open PR on the card
 • Demo screenshots/videos from the agent land in the thread when a run finishes (`/artifacts` to retry)
 """
@@ -191,7 +192,7 @@ class AgentCog(commands.Cog):
                 resolved_repo = decode_repo_ref(repo, self.bot.repo_ref_cache)
             except ValueError:
                 resolved_repo = repo
-        resolved = self._resolve_project(
+        resolved = await self._resolve_project(
             project=None,
             repo=resolved_repo,
             branch=None,
@@ -451,15 +452,18 @@ class AgentCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        channel = interaction.channel
-        if not isinstance(channel, discord.TextChannel):
+        channel = await resolve_topic_channel(self.bot, interaction.channel)
+        if channel is None:
             await interaction.response.send_message(
-                "Bind only works on text channels.", ephemeral=True
+                "Bind only works on text/forum channels.", ephemeral=True
             )
             return
-        if not channel.permissions_for(channel.guild.me).manage_channels:
+        me = channel.guild.me
+        if me is None or not channel.permissions_for(me).manage_channels:
             await interaction.response.send_message(
-                "I need **Manage Channels** to update the topic.", ephemeral=True
+                "I need **Manage Channels** on this channel "
+                "(check channel permission overwrites).",
+                ephemeral=True,
             )
             return
         new_topic = set_channel_project_topic(channel.topic, alias_l)
@@ -537,7 +541,7 @@ class AgentCog(commands.Cog):
             await message.reply(denied, mention_author=False)
             return
 
-        resolved = self._resolve_project(
+        resolved = await self._resolve_project(
             project=None,
             repo=None,
             branch=None,
@@ -646,7 +650,7 @@ class AgentCog(commands.Cog):
             mention_author=False,
         )
 
-    def _resolve_project(
+    async def _resolve_project(
         self,
         *,
         project: str | None,
@@ -654,18 +658,12 @@ class AgentCog(commands.Cog):
         branch: str | None,
         channel: discord.abc.Messageable | None,
     ) -> Project | None:
-        topic = None
-        if isinstance(channel, discord.TextChannel):
-            topic = channel.topic
-        elif isinstance(channel, discord.Thread) and isinstance(
-            channel.parent, discord.TextChannel
-        ):
-            topic = channel.parent.topic
+        topic_channel = await resolve_topic_channel(self.bot, channel)
         return self.bot.registry.resolve(
             project=project,
             repo=repo,
             branch=branch,
-            channel_topic=topic,
+            channel_topic=topic_from_channel(topic_channel),
             default_model=self.bot.settings.cursor_model,
         )
 

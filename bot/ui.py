@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot.agent_ref import is_agent_id
+from bot.channel_bind import pin_channel_repo
 from bot.multimodal import AgentPrompt
-from bot.projects import Project, parse_channel_repo, set_channel_repo_topic
+from bot.projects import Project
 from bot.repo_refs import DISCORD_VALUE_MAX, repo_path
 
 if TYPE_CHECKING:
@@ -33,7 +34,7 @@ def _desc(url: str) -> str:
 
 
 class RepoPickerView(discord.ui.View):
-    """Pick a Cursor-connected repo. First pick can silently pin the channel topic."""
+    """Pick a Cursor-connected repo. First pick pins the channel topic (reports result)."""
 
     def __init__(
         self,
@@ -52,7 +53,8 @@ class RepoPickerView(discord.ui.View):
         self.branch = branch
         self.on_picked = on_picked
         self.owner_id = owner_id
-        self.channel = _topic_channel(channel)
+        # Keep raw handle — may be PartialMessageable; resolve at pin time.
+        self.channel = channel
         self._urls = [u.rstrip("/") for u in repo_urls[:25]]
 
         options: list[discord.SelectOption] = []
@@ -99,7 +101,8 @@ class RepoPickerView(discord.ui.View):
 
         # Ack first — topic edit can exceed Discord's 3s interaction window.
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await self._maybe_pin(url)
+        pin_note = await pin_channel_repo(self.bot, self.channel, url)
+        await interaction.followup.send(pin_note, ephemeral=True)
 
         project = Project(
             alias="_explicit",
@@ -109,31 +112,6 @@ class RepoPickerView(discord.ui.View):
         )
         self.stop()
         await self.on_picked(interaction, project)
-
-    async def _maybe_pin(self, repo_url: str) -> None:
-        """If channel has no cursor-repo yet and we can edit topics, pin silently."""
-        channel = self.channel
-        if channel is None or parse_channel_repo(channel.topic):
-            return
-        if not channel.permissions_for(channel.guild.me).manage_channels:
-            return
-        try:
-            await channel.edit(topic=set_channel_repo_topic(channel.topic, repo_url))
-        except discord.HTTPException:
-            logger.warning("silent channel repo pin failed", exc_info=True)
-
-
-def _topic_channel(
-    channel: discord.abc.Messageable | None,
-) -> discord.TextChannel | None:
-    """Channel whose topic we pin — parent text channel when started from a thread."""
-    if isinstance(channel, discord.TextChannel):
-        return channel
-    if isinstance(channel, discord.Thread) and isinstance(
-        channel.parent, discord.TextChannel
-    ):
-        return channel.parent
-    return None
 
 
 class AgentControls(discord.ui.View):
