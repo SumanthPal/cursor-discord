@@ -82,7 +82,16 @@ def chat_status_body(
         hint = "reply here to follow up · `/cancel` to stop"
         if pr_url:
             hint = "reply here to follow up"
-        text = clip_discord(f"{text}\n_{hint}_")
+        trailer = ref_spoiler(agent_id, run_id)
+        if trailer and trailer in text:
+            body = text[: text.rfind(trailer)].rstrip()
+            combined = f"{body}\n_{hint}_\n{trailer}"
+            if len(combined) <= DISCORD_CONTENT_MAX:
+                return combined
+            # Keep spoiler for thread routing even if we drop the hint.
+            room = DISCORD_CONTENT_MAX - len(trailer) - 1
+            return clip_discord(body, max(1, room)) + "\n" + trailer
+        return clip_discord(f"{text}\n_{hint}_")
     return text
 
 

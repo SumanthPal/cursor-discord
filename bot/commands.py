@@ -158,6 +158,10 @@ def display_project_alias(alias: str | None) -> str | None:
 class AgentCog(commands.Cog):
     def __init__(self, bot: CursorDiscordBot) -> None:
         self.bot = bot
+        bot.turns.set_follow_up_handlers(
+            start=self._start_queued_follow_up,
+            ack=self._ack_queued_follow_up,
+        )
 
     async def cog_app_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
@@ -412,6 +416,9 @@ class AgentCog(commands.Cog):
                 ephemeral=True,
             )
             return
+
+        if interaction.channel is not None:
+            self._clear_pending_repo(interaction.channel.id, interaction.user.id)
 
         await self._launch_new_agent(
             interaction=interaction,
@@ -702,6 +709,13 @@ class AgentCog(commands.Cog):
 
         # Thread follow-ups to an existing agent
         if isinstance(message.channel, discord.Thread):
+            if self._get_pending_repo(message.channel.id, message.author.id) is not None:
+                await message.reply(
+                    "Still waiting — reply with `owner/repo` for that question, "
+                    "or `@Cursor …` for a new request.",
+                    mention_author=False,
+                )
+                return
             ref = await find_agent_ref_in_channel(
                 message.channel, bot_user_id=self.bot.user.id
             )
@@ -1072,8 +1086,16 @@ class AgentCog(commands.Cog):
     ) -> tuple[discord.Thread, discord.Message]:
         """Branch a public thread from the anchor message; first bot reply lives inside the thread."""
         if isinstance(channel, discord.Thread):
+            if interaction_user is not None:
+                await channel.send(
+                    clip_discord(f"**{interaction_user.display_name}:** {prompt}")
+                )
             status_message = await channel.send(
-                chat_ack(prompt=prompt, repo=repo, echo_prompt=False)
+                chat_ack(
+                    prompt=prompt,
+                    repo=repo,
+                    echo_prompt=interaction_user is None,
+                )
             )
             return channel, status_message
 
@@ -1253,6 +1275,7 @@ class AgentCog(commands.Cog):
                 + ref_spoiler(job.agent_id),
                 mention_author=False,
             )
+            job.status_message = status_msg
         if not isinstance(status_msg, discord.Message):
             raise TypeError("status_message must be a discord.Message")
         await self._drive_follow_up(
@@ -1355,6 +1378,13 @@ def _thread_name(prompt: str) -> str:
     if len(cleaned) > 80:
         cleaned = cleaned[:77] + "…"
     return cleaned or "cursor-agent"
+
+
+def _truncate_prompt(prompt: str) -> str:
+    cleaned = " ".join((prompt or "").split())
+    if len(cleaned) > 120:
+        return cleaned[:117] + "…"
+    return cleaned
 
 
 async def _clear_deferred_thinking(

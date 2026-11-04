@@ -299,6 +299,22 @@ def test_multimodal_prompt() -> None:
     print("ok multimodal_prompt")
 
 
+def test_chat_status_trailer() -> None:
+    from bot.chat_ui import chat_status_body
+
+    agent_id = "bc-00000000-0000-0000-0000-000000000001"
+    body = chat_status_body(
+        agent_id=agent_id,
+        status="finished",
+        summary="x" * 1800,
+        run_id="run-1",
+        pr_url="https://github.com/acme/app/pull/1",
+    )
+    assert agent_id in body
+    assert "run-1" in body
+    print("ok chat_status_trailer")
+
+
 def test_follow_up_queue() -> None:
     assert is_agent_busy_error(
         Exception("failed_precondition: [agent_busy] Agent already has an active run")
@@ -399,6 +415,7 @@ def main() -> None:
     test_policy()
     test_multimodal_prompt()
     test_cloud_artifacts()
+    test_chat_status_trailer()
     test_follow_up_queue()
     test_chat_repo_reply()
     test_repos_matching()
