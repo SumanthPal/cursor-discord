@@ -26,6 +26,12 @@ from bot.multimodal import AgentPrompt, agent_prompt_from_message
 from bot.projects import Project, parse_channel_repo, set_channel_project_topic
 from bot.projects import set_channel_repo_topic as pin_channel_repo
 from bot.repo_refs import decode_repo_ref, encode_repo_ref
+from bot.turn_coordinator import (
+    AgentBusyError,
+    FollowUpJob,
+    chat_queue_ack,
+    is_agent_busy_error,
+)
 from bot.ui import short_repo_label
 
 if TYPE_CHECKING:
@@ -38,7 +44,7 @@ DISCORD_CONTENT_MAX = 2000
 
 HELP_TEXT = """**Cursor** — chat with a cloud coding agent
 • `@Cursor …` or `/ask` — say what you want (images on the same message work too)
-• I branch a thread from your `@Cursor` message; keep talking there to steer the run
+• I branch a thread from your `@Cursor` message; keep talking there — I queue if I'm still busy
 • No repo set on the channel yet? I'll ask which one — reply with the number or name
 • `/cancel` stops a run · PR links show up in my reply when one is opened
 • Demo screenshots/videos land in the thread when a run finishes (`/artifacts` to retry)
@@ -928,17 +934,24 @@ class AgentCog(commands.Cog):
         repo: str,
         project_alias: str | None,
     ) -> None:
+        channel = interaction.channel
         status_msg = await interaction.followup.send(
             chat_ack(prompt=agent_prompt.display, repo=repo)
             + "\n"
             + ref_spoiler(agent_id)
         )
-        await self._drive_follow_up(
-            status_message=status_msg,
+        job = FollowUpJob(
             agent_id=agent_id,
             agent_prompt=agent_prompt,
             repo=repo,
             project_alias=project_alias,
+            status_message=status_msg,
+            user_message=channel if isinstance(channel, discord.Thread) else None,
+        )
+        await self.bot.turns.submit_follow_up(
+            job,
+            start=self._start_queued_follow_up,
+            ack=self._ack_queued_follow_up,
         )
 
     async def _follow_up_message(
@@ -950,17 +963,52 @@ class AgentCog(commands.Cog):
         repo: str,
         project_alias: str | None,
     ) -> None:
-        status_msg = await message.reply(
-            chat_ack(prompt=agent_prompt.display, repo=repo) + "\n" + ref_spoiler(agent_id),
-            mention_author=False,
-        )
-        await self._drive_follow_up(
-            status_message=status_msg,
+        job = FollowUpJob(
             agent_id=agent_id,
             agent_prompt=agent_prompt,
             repo=repo,
             project_alias=project_alias,
+            user_message=message,
         )
+        await self.bot.turns.submit_follow_up(
+            job,
+            start=self._start_queued_follow_up,
+            ack=self._ack_queued_follow_up,
+        )
+
+    async def _start_queued_follow_up(self, job: FollowUpJob) -> None:
+        status_msg = job.status_message
+        if status_msg is None:
+            message = job.user_message
+            if not isinstance(message, discord.Message):
+                raise TypeError("queued follow-up needs user_message or status_message")
+            status_msg = await message.reply(
+                chat_ack(prompt=job.agent_prompt.display, repo=job.repo)
+                + "\n"
+                + ref_spoiler(job.agent_id),
+                mention_author=False,
+            )
+        if not isinstance(status_msg, discord.Message):
+            raise TypeError("status_message must be a discord.Message")
+        await self._drive_follow_up(
+            status_message=status_msg,
+            agent_id=job.agent_id,
+            agent_prompt=job.agent_prompt,
+            repo=job.repo,
+            project_alias=job.project_alias,
+        )
+
+    async def _ack_queued_follow_up(self, job: FollowUpJob, depth: int) -> None:
+        anchor = job.user_message
+        if not isinstance(anchor, discord.Message):
+            status = job.status_message
+            if isinstance(status, discord.Message):
+                anchor = status
+            else:
+                return
+        if not self.bot.turns.should_ack_queue(job.agent_id, anchor.channel.id):
+            return
+        await anchor.reply(chat_queue_ack(depth=depth), mention_author=False)
 
     async def _drive_follow_up(
         self,
@@ -999,6 +1047,8 @@ class AgentCog(commands.Cog):
                 on_status=on_status,
             )
         except Exception as exc:  # noqa: BLE001
+            if is_agent_busy_error(exc):
+                raise AgentBusyError(str(exc)) from exc
             logger.exception("follow_up failed")
             await status_message.reply(
                 f"Follow-up failed: `{exc}`", mention_author=False

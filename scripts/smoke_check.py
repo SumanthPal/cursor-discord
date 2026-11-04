@@ -20,6 +20,10 @@ from bot.chat_ui import (  # noqa: E402
     format_repo_choice_prompt,
     resolve_repo_from_reply,
 )
+from bot.turn_coordinator import (  # noqa: E402
+    chat_queue_ack,
+    is_agent_busy_error,
+)
 from bot.commands import chunk_discord_lines, display_project_alias  # noqa: E402
 from bot.cloud_artifacts import (  # noqa: E402
     artifact_filename,
@@ -222,6 +226,16 @@ def test_multimodal_prompt() -> None:
     print("ok multimodal_prompt")
 
 
+def test_follow_up_queue() -> None:
+    assert is_agent_busy_error(
+        Exception("failed_precondition: [agent_busy] Agent already has an active run")
+    )
+    assert not is_agent_busy_error(Exception("network timeout"))
+    assert "next" in chat_queue_ack(depth=1)
+    assert "#3" in chat_queue_ack(depth=3)
+    print("ok follow_up_queue")
+
+
 def test_chat_repo_reply() -> None:
     urls = [
         "https://github.com/acme/widgets",
@@ -266,6 +280,7 @@ def main() -> None:
     test_policy()
     test_multimodal_prompt()
     test_cloud_artifacts()
+    test_follow_up_queue()
     test_chat_repo_reply()
     test_repo_refs()
     print("ALL SMOKE CHECKS PASSED")
