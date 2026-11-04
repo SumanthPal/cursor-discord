@@ -103,7 +103,10 @@ def test_agent_embed() -> None:
     assert spoiler.agent_id == agent_id
     assert spoiler.run_id == "run-1"
     assert "fixed auth" in done
-    assert "||cursor-agent:" in done
+    assert f"-# `{agent_id}`" in done
+    # Legacy spoilers still resolve for older thread messages.
+    legacy = parse_ref_spoiler(f"done.\n||cursor-agent:{agent_id} · run:run-9||")
+    assert legacy is not None and legacy.agent_id == agent_id and legacy.run_id == "run-9"
 
     embed = build_starter_embed(
         agent_id=agent_id,
@@ -239,6 +242,36 @@ def test_repo_refs() -> None:
     print("ok repo_refs")
 
 
+def test_activity_snippet() -> None:
+    from types import SimpleNamespace
+
+    from bot.cursor_agent import _activity_snippet
+
+    tool = SimpleNamespace(
+        type="tool_call",
+        name="read_file",
+        status="running",
+        args={"path": "bot/commands.py"},
+    )
+    assert "`read file`" in _activity_snippet(tool)
+    assert "`bot/commands.py`" in _activity_snippet(tool)
+    assert _activity_snippet(SimpleNamespace(type="thinking", text="…")) == "thinking…"
+    assert (
+        _activity_snippet(
+            SimpleNamespace(type="status", message="cloning repo", status="running")
+        )
+        == "cloning repo"
+    )
+    # Completed tools stay quiet so Discord edits don't flicker.
+    assert (
+        _activity_snippet(
+            SimpleNamespace(type="tool_call", name="shell", status="completed", args={})
+        )
+        == ""
+    )
+    print("ok activity_snippet")
+
+
 def main() -> None:
     test_imports()
     test_projects_json()
@@ -250,6 +283,7 @@ def main() -> None:
     test_multimodal_prompt()
     test_cloud_artifacts()
     test_repo_refs()
+    test_activity_snippet()
     print("ALL SMOKE CHECKS PASSED")
 
 
