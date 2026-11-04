@@ -28,10 +28,13 @@ class AgentPrompt:
 
     text: str
     images: tuple[SDKImage, ...] = ()
+    actionable: bool = True
+    feedback: str = ""
 
     @classmethod
     def from_text(cls, text: str) -> AgentPrompt:
-        return cls(text=text.strip())
+        stripped = text.strip()
+        return cls(text=stripped, actionable=bool(stripped))
 
     def sdk_message(self) -> str | UserMessage:
         if not self.images:
@@ -41,7 +44,7 @@ class AgentPrompt:
     @property
     def display(self) -> str:
         """Human-readable prompt for Discord embeds and thread titles."""
-        base = self.text
+        base = self.text or self.feedback
         if self.images:
             n = len(self.images)
             suffix = f" (+{n} image{'s' if n != 1 else ''})"
@@ -53,7 +56,7 @@ class AgentPrompt:
 
     @property
     def has_content(self) -> bool:
-        return bool(self.text.strip()) or bool(self.images)
+        return self.actionable
 
 
 def _attachment_mime(attachment: discord.Attachment) -> str | None:
@@ -93,7 +96,8 @@ async def agent_prompt_from_message(
 ) -> AgentPrompt:
     """Merge message text with downloadable image attachments."""
     stripped = text.strip()
-    notes: list[str] = []
+    file_notes: list[str] = []
+    warnings: list[str] = []
     images: list[SDKImage] = []
 
     owns_session = session is None
@@ -102,14 +106,14 @@ async def agent_prompt_from_message(
 
     try:
         for attachment in message.attachments:
-            if len(images) >= MAX_IMAGES:
-                notes.append(
-                    f"- (skipped extra attachments after {MAX_IMAGES} images)"
-                )
-                break
             if is_image_attachment(attachment):
+                if len(images) >= MAX_IMAGES:
+                    warnings.append(
+                        f"- (skipped `{attachment.filename}` — max {MAX_IMAGES} images)"
+                    )
+                    continue
                 if not is_prompt_image_attachment(attachment):
-                    notes.append(
+                    warnings.append(
                         f"- `{attachment.filename}` is not a supported prompt image "
                         "(use PNG, JPEG, GIF, or WebP — not SVG)."
                     )
@@ -122,23 +126,35 @@ async def agent_prompt_from_message(
                         attachment.filename,
                         exc,
                     )
-                    notes.append(
+                    warnings.append(
                         f"- could not load image `{attachment.filename}`: {exc}"
                     )
             else:
-                notes.append(non_image_attachment_line(attachment))
+                file_notes.append(non_image_attachment_line(attachment))
 
-        body = stripped
-        if notes:
-            block = "**Attachments (not sent as vision):**\n" + "\n".join(notes)
-            body = f"{body}\n\n{block}".strip() if body else block
+        actionable = bool(images) or bool(stripped) or bool(file_notes)
+        if not actionable:
+            return AgentPrompt(
+                text="",
+                images=tuple(images),
+                actionable=False,
+                feedback="\n".join(warnings),
+            )
 
-        if not body and images:
-            body = _EMPTY_TEXT_PLACEHOLDER
-        elif not body and not images:
-            body = ""
+        parts: list[str] = []
+        if stripped:
+            parts.append(stripped)
+        elif images:
+            parts.append(_EMPTY_TEXT_PLACEHOLDER)
+        if file_notes:
+            parts.append(
+                "**Attachments (not sent as vision):**\n" + "\n".join(file_notes)
+            )
+        if warnings:
+            parts.append("**Attachment notes:**\n" + "\n".join(warnings))
+        body = "\n\n".join(parts)
 
-        return AgentPrompt(text=body, images=tuple(images))
+        return AgentPrompt(text=body, images=tuple(images), actionable=True)
     finally:
         if owns_session and session is not None:
             await session.close()

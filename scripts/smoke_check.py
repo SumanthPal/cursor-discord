@@ -200,6 +200,9 @@ def test_multimodal_prompt() -> None:
     plain = AgentPrompt.from_text("fix the button")
     assert plain.sdk_message() == "fix the button"
     assert plain.display == "fix the button"
+    rejected = AgentPrompt(text="", actionable=False, feedback="SVG not supported")
+    assert not rejected.has_content
+    assert rejected.display == "SVG not supported"
     img = SDKImage.from_data(b"\x89PNG\r\n", "image/png")
     rich = AgentPrompt(text="look at this", images=(img,))
     assert rich.display.endswith("(+1 image)")

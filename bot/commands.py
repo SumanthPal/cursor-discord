@@ -484,6 +484,8 @@ class AgentCog(commands.Cog):
             )
             if ref and not _is_bot_mention_only(message, self.bot.user):
                 prompt_text = message.content.strip()
+                if self.bot.user in message.mentions:
+                    prompt_text = _strip_mention(message.content, self.bot.user)
                 if (
                     (prompt_text or message.attachments)
                     and not message.content.startswith("/")
@@ -498,6 +500,11 @@ class AgentCog(commands.Cog):
                         message, text=prompt_text
                     )
                     if not agent_prompt.has_content:
+                        if agent_prompt.feedback:
+                            await message.reply(
+                                clip_discord(agent_prompt.feedback),
+                                mention_author=False,
+                            )
                         return
                     await self._follow_up_message(
                         message=message,
@@ -513,10 +520,16 @@ class AgentCog(commands.Cog):
         prompt_text = _strip_mention(message.content, self.bot.user)
         agent_prompt = await agent_prompt_from_message(message, text=prompt_text)
         if not agent_prompt.has_content:
-            await message.reply(
-                "`@Cursor <what to do>` (images can be attached) or `/ask`",
-                mention_author=False,
-            )
+            if agent_prompt.feedback:
+                await message.reply(
+                    clip_discord(agent_prompt.feedback),
+                    mention_author=False,
+                )
+            else:
+                await message.reply(
+                    "`@Cursor <what to do>` (images can be attached) or `/ask`",
+                    mention_author=False,
+                )
             return
 
         denied = self.bot.policy.authorize(user=message.author, guild=message.guild)

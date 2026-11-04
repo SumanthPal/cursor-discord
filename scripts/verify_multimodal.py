@@ -108,6 +108,17 @@ def verify_prompt_images() -> None:
     print("PASS prompt.images UserMessage wire format")
 
 
+def verify_strip_mention() -> None:
+    from bot.commands import _strip_mention
+
+    class BotUser:
+        id = 4242
+
+    assert _strip_mention("<@4242> fix this", BotUser()) == "fix this"  # type: ignore[arg-type]
+    assert _strip_mention("<@!4242>", BotUser()) == ""  # type: ignore[arg-type]
+    print("PASS mention stripped from thread follow-up text")
+
+
 def verify_mention_only_with_attachments() -> None:
     from bot.commands import _is_bot_mention_only
 
@@ -201,8 +212,17 @@ async def verify_artifact_retry_after_upload_failure() -> None:
     print("PASS artifact retry after failed Discord upload")
 
 
+def verify_warnings_only() -> None:
+    bad = AgentPrompt(text="", actionable=False, feedback="- svg rejected")
+    assert not bad.has_content
+    assert bad.feedback
+    print("PASS warnings-only prompts are not actionable")
+
+
 async def main() -> None:
     verify_prompt_images()
+    verify_strip_mention()
+    verify_warnings_only()
     verify_mention_only_with_attachments()
     await verify_artifact_delivery()
     await verify_artifact_retry_after_upload_failure()
