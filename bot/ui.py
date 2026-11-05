@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
+
 import discord
 
-from bot.agent_ref import is_agent_id
 from bot.channel_bind import pin_channel_repo
 from bot.repo_refs import DISCORD_VALUE_MAX, repo_path
 
@@ -71,76 +71,3 @@ class SetupView(discord.ui.View):
         note = await pin_channel_repo(self.bot, self.channel, urls, force=True)
         self.stop()
         await interaction.followup.send(note, ephemeral=True)
-
-
-class AgentControls(discord.ui.View):
-    """Legacy cancel/PR buttons — prefer `/cancel` and links in chat replies."""
-
-    def __init__(
-        self,
-        bot: CursorDiscordBot,
-        *,
-        agent_id: str,
-        running: bool = True,
-        pr_url: str | None = None,
-    ) -> None:
-        super().__init__(timeout=900)
-        self.bot = bot
-        self.agent_id = agent_id
-
-        if running and is_agent_id(agent_id):
-            cancel = discord.ui.Button(
-                label="Cancel",
-                style=discord.ButtonStyle.danger,
-                custom_id=f"cursor:cancel:{agent_id}"[:100],
-            )
-            cancel.callback = self._cancel  # type: ignore[method-assign]
-            self.add_item(cancel)
-
-        if pr_url:
-            self.add_item(
-                discord.ui.Button(
-                    label="Open PR",
-                    style=discord.ButtonStyle.link,
-                    url=pr_url,
-                )
-            )
-
-    async def _cancel(self, interaction: discord.Interaction) -> None:
-        denied = self.bot.policy.authorize(
-            user=interaction.user, guild=interaction.guild
-        )
-        if denied:
-            await interaction.response.send_message(denied, ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            msg = await self.bot.cursor.cancel(self.agent_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("cancel button failed")
-            await interaction.followup.send(f"Cancel failed: {exc}", ephemeral=True)
-            return
-        await interaction.followup.send(msg, ephemeral=True)
-
-
-def controls_for(
-    bot: CursorDiscordBot,
-    *,
-    agent_id: str,
-    status: str,
-    pr_url: str | None = None,
-) -> AgentControls | None:
-    running = (status or "").lower() in {
-        "starting",
-        "created",
-        "running",
-        "streaming",
-    }
-    if not is_agent_id(agent_id) and not pr_url:
-        return None
-    # Only show chrome while running (Cancel) or when there's a PR link.
-    if not running and not pr_url:
-        return None
-    return AgentControls(
-        bot, agent_id=agent_id or "pending", running=running, pr_url=pr_url
-    )

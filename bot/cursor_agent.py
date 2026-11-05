@@ -151,9 +151,6 @@ class CursorAgentService:
                 if hasattr(result, "__await__"):
                     await result  # type: ignore[misc]
 
-    def is_run_active(self, agent_id: str) -> bool:
-        return agent_id in self._active_runs
-
     async def list_repos(self) -> list[str]:
         """URLs Cursor can clone for this API key (GitHub-connected account)."""
         items = await self.client.list_repositories(api_key=self.api_key)
