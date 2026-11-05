@@ -37,18 +37,6 @@ def encode_repo_ref(url: str, cache: dict[str, str]) -> str:
     return key
 
 
-def repos_matching(urls: list[str], query: str) -> list[str]:
-    """Case-insensitive substring match on owner/repo path or full URL."""
-    needle = (query or "").strip().lower()
-    if not needle:
-        return list(urls)
-    out: list[str] = []
-    for url in urls:
-        if needle in url.lower() or needle in repo_path(url).lower():
-            out.append(url)
-    return out
-
-
 def decode_repo_ref(value: str, cache: dict[str, str]) -> str:
     """Resolve a Discord choice/select value back to a full clone URL."""
     value = (value or "").strip()

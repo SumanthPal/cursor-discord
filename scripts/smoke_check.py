@@ -9,22 +9,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import discord  # noqa: E402
+
 from bot.agent_ref import (  # noqa: E402
-    build_starter_embed,
     chat_done,
     is_agent_id,
     parse_agent_ref_from_embed,
     parse_ref_spoiler,
 )
-from bot.chat_ui import (  # noqa: E402
-    format_repo_choice_prompt,
-    resolve_repo_from_reply,
-)
 from bot.turn_coordinator import (  # noqa: E402
     chat_queue_ack,
     is_agent_busy_error,
 )
-from bot.commands import chunk_discord_lines, display_project_alias  # noqa: E402
+from bot.discord_text import chunk_discord_lines  # noqa: E402
 from bot.cloud_artifacts import (  # noqa: E402
     artifact_filename,
     artifact_fingerprint,
@@ -104,8 +101,6 @@ def test_channel_bind() -> None:
     assert reg.channel_projects("cursor-project:web")[0].repo.endswith("/acme/web")
     assert reg.channel_projects("no binding") == []
     assert same_repo("acme/A", "https://github.com/acme/a/")
-    assert display_project_alias("_channel") is None
-    assert display_project_alias("instinct") == "instinct"
     print("ok channel_bind")
 
 
@@ -159,15 +154,8 @@ def test_agent_embed() -> None:
     legacy = parse_ref_spoiler(f"done.\n||cursor-agent:{agent_id} · run:run-9||")
     assert legacy is not None and legacy.agent_id == agent_id and legacy.run_id == "run-9"
 
-    embed = build_starter_embed(
-        agent_id=agent_id,
-        prompt="fix auth",
-        project="instinct",
-        repo="https://github.com/you/Instinct-2.0",
-        status="running",
-        run_id="run-1",
-        summary="still going",
-    )
+    embed = discord.Embed(description="legacy status card")
+    embed.set_footer(text=f"cursor-agent:{agent_id} · run:run-1")
     ref = parse_agent_ref_from_embed(embed)
     assert ref is not None
     assert ref.agent_id == agent_id
@@ -330,27 +318,11 @@ def test_chat_repo_reply() -> None:
         "https://github.com/acme/widgets",
         "https://github.com/acme/monorepo",
     ]
-    prompt = format_repo_choice_prompt(urls, task_preview="fix login")
-    assert "1." in prompt and "acme/widgets" in prompt
-    assert resolve_repo_from_reply("2", urls) == urls[1]
-    assert resolve_repo_from_reply("widgets", urls) == urls[0]
-    assert resolve_repo_from_reply("nope", urls) is None
+    assert match_allowed_repo("acme/widgets", urls) == urls[0]
+    assert match_allowed_repo("https://github.com/acme/monorepo", urls) == urls[1]
+    assert match_allowed_repo("widgets", urls) == urls[0]
+    assert match_allowed_repo("nope", urls) is None
     print("ok chat_repo_reply")
-
-
-def test_repos_matching() -> None:
-    from bot.repo_refs import repos_matching
-
-    urls = [
-        "https://github.com/acme/frontend",
-        "https://github.com/acme/backend",
-        "https://github.com/other/widget",
-    ]
-    assert repos_matching(urls, "") == urls
-    assert repos_matching(urls, "acme") == urls[:2]
-    assert repos_matching(urls, "widget") == [urls[2]]
-    assert repos_matching(urls, "nope") == []
-    print("ok repos_matching")
 
 
 def test_repo_refs() -> None:
@@ -418,7 +390,6 @@ def main() -> None:
     test_chat_status_trailer()
     test_follow_up_queue()
     test_chat_repo_reply()
-    test_repos_matching()
     test_repo_refs()
     test_activity_snippet()
     print("ALL SMOKE CHECKS PASSED")

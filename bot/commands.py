@@ -10,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.agent_ref import (
+    chat_failed,
     find_agent_ref_in_channel,
     is_agent_id,
     ref_spoiler,
@@ -19,12 +20,8 @@ from bot.channel_bind import (
     resolve_topic_channel,
     topic_from_channel,
 )
-from bot.chat_ui import (
-    ChatStatusEditor,
-    chat_ack,
-    chat_failed,
-    chat_status_body,
-)
+from bot.chat_ui import ChatStatusEditor, chat_ack, chat_status_body
+from bot.discord_text import clip_discord, chunk_discord_lines
 from bot.cloud_artifacts import deliver_new_cloud_artifacts
 from bot.multimodal import AgentPrompt, agent_prompt_from_message
 from bot.projects import (
@@ -49,9 +46,6 @@ if TYPE_CHECKING:
     from bot.main import CursorDiscordBot
 
 logger = logging.getLogger(__name__)
-
-# Discord message content hard limit (embeds use a higher cap).
-DISCORD_CONTENT_MAX = 2000
 
 HELP_TEXT = """**Cursor** — chat with a cloud coding agent
 • `@Cursor …` or `/ask` — say what you want (images on the same message work too)
@@ -102,57 +96,6 @@ class PendingRepoAsk:
     channel_id: int
     expires_at: float
     thread_anchor_message_id: int | None = None
-
-
-def clip_discord(text: str, limit: int = DISCORD_CONTENT_MAX) -> str:
-    """Keep a single Discord content body under the API limit."""
-    if len(text) <= limit:
-        return text
-    suffix = "…"
-    return text[: max(0, limit - len(suffix))] + suffix
-
-
-def chunk_discord_lines(
-    header: str,
-    lines: list[str],
-    *,
-    footer: str = "",
-    limit: int = DISCORD_CONTENT_MAX,
-) -> list[str]:
-    """Pack lines into Discord messages under `limit` chars each.
-
-    When `footer` is set, every page reserves space for it so the last page
-    can append the footer without dropping lines or spinning on rsplit.
-    """
-    # Reserve "\n" + footer on every page so the last page can append safely.
-    footer_room = (1 + len(footer)) if footer else 0
-    body_limit = max(1, limit - footer_room)
-    chunks: list[str] = []
-    current = header
-    for line in lines:
-        candidate = f"{current}\n{line}" if current else line
-        if len(candidate) <= body_limit:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-        current = clip_discord(line, body_limit) if len(line) > body_limit else line
-    if current:
-        chunks.append(current)
-    if not chunks:
-        chunks = [header or "_(empty)_"]
-    if footer:
-        last = chunks[-1]
-        joined = f"{last}\n{footer}" if last else footer
-        chunks[-1] = clip_discord(joined, limit)
-    return [clip_discord(c, limit) for c in chunks]
-
-
-def display_project_alias(alias: str | None) -> str | None:
-    """Hide internal resolve aliases from Discord chrome."""
-    if not alias or alias.startswith("_"):
-        return None
-    return alias
 
 
 class AgentCog(commands.Cog):

@@ -9,6 +9,9 @@ from bot.repo_refs import repo_path
 
 FOOTER_PREFIX = "cursor-agent:"
 AGENT_ID_RE = re.compile(r"^bc-[A-Za-z0-9-]+$")
+ACTIVE_AGENT_STATUSES = frozenset(
+    {"starting", "created", "running", "streaming"}
+)
 # Spoiler (legacy) or Discord subtext trailer carrying the bc- id.
 _REF_TRAILER_RE = re.compile(
     rf"(?:\|\||-#\s+)?(?:{re.escape(FOOTER_PREFIX)})?`?(bc-[A-Za-z0-9-]+)`?"
@@ -31,12 +34,7 @@ def is_agent_id(value: str | None) -> bool:
 
 
 def _is_active(status: str) -> bool:
-    return (status or "").lower() in {
-        "starting",
-        "created",
-        "running",
-        "streaming",
-    }
+    return (status or "").lower() in ACTIVE_AGENT_STATUSES
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -140,46 +138,6 @@ def chat_failed(exc: object) -> str:
 
 
 # --- legacy embed support (older status cards still resolve in threads) ---
-
-
-def build_starter_embed(
-    *,
-    agent_id: str,
-    prompt: str,
-    project: str | None,
-    repo: str,
-    status: str = "starting",
-    summary: str | None = None,
-    run_id: str | None = None,
-    pr_url: str | None = None,
-    branch: str | None = None,
-    tip: str | None = None,
-) -> discord.Embed:
-    """Thin leftover for anything still calling embeds; prefer chat_* helpers."""
-    _ = (prompt, project, tip, branch)  # unused — kept for call-site compat
-    color = discord.Color.dark_grey()
-    if _is_active(status):
-        color = discord.Color.blurple()
-    elif (status or "").lower() in {"finished", "completed"}:
-        color = discord.Color.green()
-    elif (status or "").lower() == "error":
-        color = discord.Color.red()
-    embed = discord.Embed(
-        description=chat_done(
-            agent_id=agent_id if is_agent_id(agent_id) else "pending",
-            status=status,
-            summary=summary or chat_working(repo=repo, status=status),
-            run_id=run_id,
-            pr_url=pr_url,
-            repo=repo,
-        )[:4096],
-        color=color,
-    )
-    footer = f"{FOOTER_PREFIX}{agent_id}"
-    if run_id:
-        footer = f"{footer} · run:{run_id}"
-    embed.set_footer(text=_truncate(footer, 180))
-    return embed
 
 
 def parse_agent_ref_from_message(
