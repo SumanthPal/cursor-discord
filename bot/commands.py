@@ -17,9 +17,8 @@ from bot.agent_cards import (
 from bot.agent_ref import (
     AgentRef,
     chat_failed,
-    find_agent_ref_in_channel,
     is_agent_id,
-    ref_spoiler,
+    resolve_agent_ref_in_channel,
 )
 from bot.agent_sessions import agent_dashboard_url, repo_preference_channel_id
 from bot.cursor_parse import (
@@ -302,8 +301,10 @@ class AgentCog(commands.Cog):
         resolved_id = agent_id.strip() if agent_id else None
         if not resolved_id:
             assert self.bot.user is not None
-            ref = await find_agent_ref_in_channel(
-                channel, bot_user_id=self.bot.user.id
+            ref = await resolve_agent_ref_in_channel(
+                channel,
+                bot_user_id=self.bot.user.id,
+                thread_agents=self.bot.thread_agents,
             )
             if not ref:
                 await interaction.followup.send(
@@ -518,8 +519,10 @@ class AgentCog(commands.Cog):
         resolved_id = agent_id.strip() if agent_id else None
         if not resolved_id:
             assert self.bot.user is not None
-            ref = await find_agent_ref_in_channel(
-                interaction.channel, bot_user_id=self.bot.user.id
+            ref = await resolve_agent_ref_in_channel(
+                interaction.channel,
+                bot_user_id=self.bot.user.id,
+                thread_agents=self.bot.thread_agents,
             )
             if not ref:
                 await interaction.followup.send(
@@ -570,8 +573,10 @@ class AgentCog(commands.Cog):
         run_id = None
         if not resolved_id:
             assert self.bot.user is not None
-            ref = await find_agent_ref_in_channel(
-                interaction.channel, bot_user_id=self.bot.user.id
+            ref = await resolve_agent_ref_in_channel(
+                interaction.channel,
+                bot_user_id=self.bot.user.id,
+                thread_agents=self.bot.thread_agents,
             )
             if not ref:
                 await interaction.followup.send(
@@ -859,8 +864,10 @@ class AgentCog(commands.Cog):
 
         ref = None
         if isinstance(message.channel, (discord.Thread, discord.DMChannel)):
-            ref = await find_agent_ref_in_channel(
-                message.channel, bot_user_id=self.bot.user.id
+            ref = await resolve_agent_ref_in_channel(
+                message.channel,
+                bot_user_id=self.bot.user.id,
+                thread_agents=self.bot.thread_agents,
             )
 
         if ref and is_stop_message(message.content, bot_user_id=self.bot.user.id):
@@ -888,6 +895,11 @@ class AgentCog(commands.Cog):
                     mention_author=False,
                 )
                 return
+            ref = await resolve_agent_ref_in_channel(
+                message.channel,
+                bot_user_id=self.bot.user.id,
+                thread_agents=self.bot.thread_agents,
+            )
             if (
                 ref
                 and self.bot.user in message.mentions
@@ -1494,6 +1506,14 @@ class AgentCog(commands.Cog):
                 error=str(err) if err else None,
             )
             embed = card if state in {"created", "starting"} else None
+            if is_agent_id(agent_id):
+                self._bind_thread_agent(
+                    thread,
+                    agent_id=agent_id,
+                    run_id=data.get("run_id"),
+                    repo=project.repo,
+                    project=project.alias,
+                )
             await editor.set_content(
                 body,
                 embed=embed,
@@ -1547,7 +1567,33 @@ class AgentCog(commands.Cog):
         )
         await editor.set_content(final, embed=done_embed, view=view, force=True)
         await _set_status_reaction(status_message, outcome.status)
+        self._bind_thread_agent(
+            thread,
+            agent_id=outcome.agent_id,
+            run_id=outcome.run_id,
+            repo=project.repo,
+            project=project.alias,
+        )
         await self._deliver_artifacts(thread, outcome.agent_id)
+
+    def _bind_thread_agent(
+        self,
+        thread: discord.Thread,
+        *,
+        agent_id: str,
+        run_id: str | None = None,
+        repo: str | None = None,
+        project: str | None = None,
+    ) -> None:
+        if not is_agent_id(agent_id):
+            return
+        prev = self.bot.thread_agents.get(thread.id)
+        self.bot.thread_agents[thread.id] = AgentRef(
+            agent_id=agent_id,
+            run_id=run_id if run_id is not None else (prev.run_id if prev else None),
+            repo=repo or (prev.repo if prev else None),
+            project=project or (prev.project if prev else None),
+        )
 
     async def _deliver_artifacts(
         self, thread: discord.abc.Messageable, agent_id: str
@@ -1577,8 +1623,6 @@ class AgentCog(commands.Cog):
         channel = interaction.channel
         status_msg = await interaction.followup.send(
             chat_ack(prompt=agent_prompt.display, repo=repo)
-            + "\n"
-            + ref_spoiler(agent_id)
         )
         job = FollowUpJob(
             agent_id=agent_id,
@@ -1623,9 +1667,7 @@ class AgentCog(commands.Cog):
             if not isinstance(message, discord.Message):
                 raise TypeError("queued follow-up needs user_message or status_message")
             status_msg = await message.reply(
-                chat_ack(prompt=job.agent_prompt.display, repo=job.repo)
-                + "\n"
-                + ref_spoiler(job.agent_id),
+                chat_ack(prompt=job.agent_prompt.display, repo=job.repo),
                 mention_author=False,
             )
             job.status_message = status_msg
@@ -1710,6 +1752,14 @@ class AgentCog(commands.Cog):
     ) -> None:
         editor = ChatStatusEditor(status_message)
         assert self.bot.user is not None
+        thread = status_message.channel
+        if isinstance(thread, discord.Thread):
+            self._bind_thread_agent(
+                thread,
+                agent_id=agent_id,
+                repo=repo if repo != "(existing agent)" else None,
+                project=project_alias,
+            )
         augmented = await augment_prompt_with_thread(
             agent_prompt,
             channel=status_message.channel,
@@ -1723,6 +1773,14 @@ class AgentCog(commands.Cog):
             err = data.get("error")
             if err:
                 state = "error"
+            if isinstance(thread, discord.Thread):
+                self._bind_thread_agent(
+                    thread,
+                    agent_id=agent_id,
+                    run_id=data.get("run_id"),
+                    repo=repo if repo != "(existing agent)" else None,
+                    project=project_alias,
+                )
             body = chat_status_body(
                 agent_id=agent_id,
                 status=state,
@@ -1775,10 +1833,15 @@ class AgentCog(commands.Cog):
             final, embed=done_embed, view=view, force=True
         )
         await _set_status_reaction(status_message, outcome.status)
-
-        channel = status_message.channel
-        if isinstance(channel, discord.Thread):
-            await self._deliver_artifacts(channel, outcome.agent_id)
+        if isinstance(thread, discord.Thread):
+            self._bind_thread_agent(
+                thread,
+                agent_id=outcome.agent_id,
+                run_id=outcome.run_id,
+                repo=repo if repo != "(existing agent)" else None,
+                project=project_alias,
+            )
+            await self._deliver_artifacts(thread, outcome.agent_id)
 
 
 async def _set_status_reaction(message: discord.Message, status: str) -> None:
