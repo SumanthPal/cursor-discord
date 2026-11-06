@@ -308,9 +308,27 @@ def test_follow_up_queue() -> None:
         Exception("failed_precondition: [agent_busy] Agent already has an active run")
     )
     assert not is_agent_busy_error(Exception("network timeout"))
-    assert "next" in chat_queue_ack(depth=1)
-    assert "#3" in chat_queue_ack(depth=3)
+    assert "fold" in chat_queue_ack(depth=1).lower()
+    assert "3" in chat_queue_ack(depth=3)
     print("ok follow_up_queue")
+
+
+def test_cursor_parse() -> None:
+    from bot.cursor_parse import MentionKind, parse_mention, strip_inline_options
+
+    parsed = parse_mention("help")
+    assert parsed.kind == MentionKind.HELP
+    parsed2 = parse_mention('repo=acme/app branch=dev autopr=false fix ci')
+    assert parsed2.options.repo.endswith("/acme/app")
+    assert parsed2.options.branch == "dev"
+    assert parsed2.options.auto_create_pr is False
+    assert parsed2.prompt == "fix ci"
+    parsed3 = parse_mention("agent try a new approach")
+    assert parsed3.kind == MentionKind.FORCE_AGENT
+    opts, rest = strip_inline_options('model="composer-2.5" ship it')
+    assert opts.model == "composer-2.5"
+    assert rest == "ship it"
+    print("ok cursor_parse")
 
 
 def test_chat_repo_reply() -> None:
@@ -389,6 +407,7 @@ def main() -> None:
     test_cloud_artifacts()
     test_chat_status_trailer()
     test_follow_up_queue()
+    test_cursor_parse()
     test_chat_repo_reply()
     test_repo_refs()
     test_activity_snippet()

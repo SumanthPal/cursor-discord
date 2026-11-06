@@ -8,6 +8,7 @@ import discord
 from aiohttp import web
 from discord.ext import commands
 
+from bot.agent_sessions import SessionRegistry
 from bot.commands import AgentCog
 from bot.turn_coordinator import TurnCoordinator
 from bot.config import Settings, load_settings
@@ -46,6 +47,7 @@ class CursorDiscordBot(commands.Bot):
         self.posted_artifacts: dict[str, set[str]] = {}
         # Waiting for a chat reply with owner/repo (key: channel_id, user_id).
         self.pending_repo_asks: dict[tuple[int, int], object] = {}
+        self.sessions = SessionRegistry()
         self.turns = turns or TurnCoordinator()
         self._http_runner: web.AppRunner | None = None
 
