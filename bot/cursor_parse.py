@@ -111,13 +111,13 @@ def parse_mention(raw: str) -> ParsedMention:
     lowered = body.strip().lower()
 
     if not lowered:
-        return ParsedMention(kind=MentionKind.HELP)
+        return ParsedMention(kind=MentionKind.PROMPT, prompt="", options=opts)
 
     if lowered in {"help", "commands", "?"}:
         return ParsedMention(kind=MentionKind.HELP, options=opts)
 
-    if lowered.startswith("settings"):
-        rest = body[len("settings") :].strip()
+    if re.match(r"^settings(?:$|[\s:])", lowered):
+        rest = re.sub(r"^settings", "", body, count=1, flags=re.IGNORECASE).strip()
         repos = parse_settings_repos(rest) if rest else ()
         return ParsedMention(kind=MentionKind.SETTINGS, settings_repos=repos, options=opts)
 

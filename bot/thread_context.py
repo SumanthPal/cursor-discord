@@ -14,6 +14,10 @@ MAX_MESSAGES = 35
 MAX_CHARS = 14_000
 _BOT_SNIPPET = 400
 _USER_SNIPPET = 800
+_CURRENT_HEADER = "[Current request]\n"
+_CONTEXT_HEADER = (
+    "[Discord thread context — earlier messages in this conversation]\n"
+)
 
 
 async def augment_prompt_with_thread(
@@ -32,23 +36,31 @@ async def augment_prompt_with_thread(
         before_message=before_message,
         bot_user_id=bot_user_id,
     )
+    request = prompt.text or "(See attached image(s).)"
     if not lines:
         return prompt
 
-    header = (
-        "[Discord thread context — earlier messages in this conversation]\n"
-        + "\n".join(lines)
-        + "\n\n[Current request]\n"
-    )
-    combined = header + (prompt.text or "(See attached image(s).)")
-    if len(combined) > MAX_CHARS:
-        combined = combined[: MAX_CHARS - 1] + "…"
+    combined = _fit_context_and_request(lines=lines, request=request)
     return AgentPrompt(
         text=combined,
         images=prompt.images,
         actionable=prompt.actionable,
         feedback=prompt.feedback,
     )
+
+
+def _fit_context_and_request(*, lines: list[str], request: str) -> str:
+    """Keep the current request intact; drop oldest context lines if needed."""
+    while lines:
+        header = _CONTEXT_HEADER + "\n".join(lines) + "\n\n" + _CURRENT_HEADER
+        combined = header + request
+        if len(combined) <= MAX_CHARS:
+            return combined
+        lines.pop(0)
+    room = max(1, MAX_CHARS - len(_CURRENT_HEADER))
+    if len(request) > room:
+        request = request[: room - 1] + "…"
+    return _CURRENT_HEADER + request
 
 
 async def _collect_thread_lines(
@@ -60,20 +72,22 @@ async def _collect_thread_lines(
     if not hasattr(channel, "history"):
         return []
 
-    collected: list[tuple[float, str]] = []
+    kwargs: dict[str, object] = {"limit": MAX_MESSAGES, "oldest_first": False}
+    if before_message is not None:
+        kwargs["before"] = before_message
+
+    collected: list[str] = []
     try:
-        async for message in channel.history(limit=MAX_MESSAGES, oldest_first=True):
-            if before_message is not None and message.id >= before_message.id:
-                continue
+        async for message in channel.history(**kwargs):  # type: ignore[arg-type]
             line = _format_history_line(message, bot_user_id=bot_user_id)
             if line:
-                collected.append((message.created_at.timestamp(), line))
+                collected.append(line)
     except discord.HTTPException:
         logger.debug("thread history fetch failed", exc_info=True)
         return []
 
-    collected.sort(key=lambda x: x[0])
-    return [line for _, line in collected]
+    collected.reverse()
+    return collected
 
 
 def _format_history_line(message: discord.Message, *, bot_user_id: int) -> str:

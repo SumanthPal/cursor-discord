@@ -20,7 +20,7 @@ from bot.agent_ref import (
     is_agent_id,
     ref_spoiler,
 )
-from bot.agent_sessions import agent_dashboard_url
+from bot.agent_sessions import agent_dashboard_url, repo_preference_channel_id
 from bot.cursor_parse import (
     LaunchOptions,
     MentionKind,
@@ -687,6 +687,10 @@ class AgentCog(commands.Cog):
             await message.reply(denied, mention_author=False)
             return
         if repos:
+            denied_admin = self.bot.policy.check_admin(message.author)
+            if denied_admin:
+                await message.reply(denied_admin, mention_author=False)
+                return
             note = await pin_channel_repo(
                 self.bot, message.channel, list(repos), force=True
             )
@@ -799,7 +803,11 @@ class AgentCog(commands.Cog):
             return
 
         # DM follow-ups without @Cursor (Slack DM parity)
-        if isinstance(message.channel, discord.DMChannel) and ref:
+        if (
+            isinstance(message.channel, discord.DMChannel)
+            and ref
+            and self.bot.user not in message.mentions
+        ):
             if self._get_pending_repo(message.channel.id, message.author.id) is not None:
                 return
             prompt_text = message.content.strip()
@@ -1025,13 +1033,26 @@ class AgentCog(commands.Cog):
         )
         return updated, auto_pr
 
-    async def _recent_repo_for_channel(
+    def _repo_preference_channel_id(
         self, channel: discord.abc.Messageable | None
-    ) -> str | None:
+    ) -> int | None:
+        if channel is None:
+            return None
         cid = getattr(channel, "id", None)
         if not isinstance(cid, int):
             return None
-        return self.bot.sessions.recent_repo(cid)
+        parent_id = getattr(channel, "parent_id", None)
+        if not isinstance(parent_id, int):
+            parent_id = None
+        return repo_preference_channel_id(cid, parent_id=parent_id)
+
+    async def _recent_repo_for_channel(
+        self, channel: discord.abc.Messageable | None
+    ) -> str | None:
+        pref = self._repo_preference_channel_id(channel)
+        if pref is None:
+            return None
+        return self.bot.sessions.recent_repo(pref)
 
     async def _plan_launch(
         self,
@@ -1387,12 +1408,16 @@ class AgentCog(commands.Cog):
         async def on_status(state: str, data: dict) -> None:
             agent_id = data.get("agent_id") or "pending"
             if agent_id != "pending" and user is not None:
+                parent_id = thread.parent_id if isinstance(thread.parent_id, int) else None
                 self.bot.sessions.remember(
                     agent_id=agent_id,
                     discord_user_id=user.id,
                     channel_id=thread.id,
                     repo=project.repo,
                     prompt_summary=_truncate_prompt(agent_prompt.display),
+                    repo_preference_channel_id=repo_preference_channel_id(
+                        thread.id, parent_id=parent_id
+                    ),
                 )
                 self.bot.sessions.set_status(agent_id, state)
             summary = data.get("snippet") or data.get("result")
@@ -1416,10 +1441,8 @@ class AgentCog(commands.Cog):
                 embed=embed,
                 force=state not in {"running", "streaming"},
             )
-            if state in {"running", "streaming"}:
-                await _set_status_reaction(status_message, state)
-
         try:
+            await _set_status_reaction(status_message, "running")
             outcome = await self.bot.cursor.create_and_run(
                 prompt=agent_prompt.sdk_message(),
                 repo_url=project.repo,
@@ -1705,12 +1728,15 @@ async def _set_status_reaction(message: discord.Message, status: str) -> None:
         emoji = "❌"
     else:
         emoji = "✅"
+    if getattr(message, "_cursor_status_emoji", None) == emoji:
+        return
     try:
         await message.clear_reactions()
     except discord.HTTPException:
         pass
     try:
         await message.add_reaction(emoji)
+        message._cursor_status_emoji = emoji  # type: ignore[attr-defined]
     except discord.HTTPException:
         pass
 

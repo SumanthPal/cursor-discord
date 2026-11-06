@@ -325,6 +325,9 @@ def test_cursor_parse() -> None:
 
     parsed = parse_mention("help")
     assert parsed.kind == MentionKind.HELP
+    assert parse_mention("").kind == MentionKind.PROMPT
+    assert parse_mention("settings.json is broken").kind == MentionKind.PROMPT
+    assert parse_mention("settings repos:acme/a").kind == MentionKind.SETTINGS
     parsed2 = parse_mention('repo=acme/app branch=dev autopr=false fix ci')
     assert parsed2.options.repo.endswith("/acme/app")
     assert parsed2.options.branch == "dev"

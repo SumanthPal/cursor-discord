@@ -16,6 +16,11 @@ class AgentSession:
     status: str = "starting"
 
 
+def repo_preference_channel_id(channel_id: int, *, parent_id: int | None) -> int:
+    """Parent text channel id for threads (repo picker memory)."""
+    return parent_id if parent_id is not None else channel_id
+
+
 class SessionRegistry:
     def __init__(self) -> None:
         self._by_id: dict[str, AgentSession] = {}
@@ -29,7 +34,9 @@ class SessionRegistry:
         channel_id: int,
         repo: str,
         prompt_summary: str,
+        repo_preference_channel_id: int | None = None,
     ) -> None:
+        pref = repo_preference_channel_id if repo_preference_channel_id is not None else channel_id
         self._by_id[agent_id] = AgentSession(
             agent_id=agent_id,
             discord_user_id=discord_user_id,
@@ -37,7 +44,7 @@ class SessionRegistry:
             repo=repo,
             prompt_summary=prompt_summary,
         )
-        self._recent_repo[channel_id] = repo
+        self._recent_repo[pref] = repo
 
     def recent_repo(self, channel_id: int) -> str | None:
         return self._recent_repo.get(channel_id)
