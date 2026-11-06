@@ -37,6 +37,7 @@ from bot.channel_bind import (
 from bot.chat_ui import ChatStatusEditor, chat_ack, chat_status_body
 from bot.discord_text import clip_discord, chunk_discord_lines
 from bot.cloud_artifacts import deliver_new_cloud_artifacts
+from bot.cloud_steer import steer_ack
 from bot.multimodal import AgentPrompt, agent_prompt_from_message, coalesce_ack
 from bot.projects import (
     Project,
@@ -66,7 +67,7 @@ HELP_TEXT = """**Cursor** — cloud agents in Discord (Slack-style)
 • `@Cursor settings` — show channel repo defaults · `@Cursor settings repos:owner/a,owner/b` to pin
 • `@Cursor list my agents` — your recent runs · `@Cursor help` — this message
 • In **DMs**, reply in the thread **without** `@Cursor` · in **channels**, `@Cursor` each follow-up
-• While I'm busy, extra messages **merge into one turn** (Slack-style coalesce) · `stop` cancels
+• While I'm busy, extra messages **redirect the current run** (API steer) · `stop` cancels
 • `/ask` / `/cancel` / `/status` / `/artifacts` also work · PR + demo artifacts when a run finishes
 
 **Admins** (`SUPERUSER_IDS`): `/setup`, `/grant`, `/revoke` · Open runs: {dashboard}
@@ -115,6 +116,10 @@ class AgentCog(commands.Cog):
         bot.turns.set_follow_up_handlers(
             start=self._start_queued_follow_up,
             ack=self._ack_queued_follow_up,
+        )
+        bot.turns.set_steer_handler(
+            steer=self._steer_follow_up,
+            is_run_active=bot.cursor.is_run_active,
         )
 
     async def cog_app_command_error(
@@ -1554,6 +1559,46 @@ class AgentCog(commands.Cog):
             project_alias=job.project_alias,
             anchor_message=anchor if isinstance(anchor, discord.Message) else None,
         )
+
+    async def _steer_follow_up(self, job: FollowUpJob) -> None:
+        assert self.bot.user is not None
+        anchor = job.user_message
+        if not isinstance(anchor, discord.Message):
+            status = job.status_message
+            anchor = status if isinstance(status, discord.Message) else None
+        channel: discord.abc.Messageable | None = None
+        if isinstance(anchor, discord.Message):
+            channel = anchor.channel
+        elif isinstance(job.status_message, discord.Message):
+            channel = job.status_message.channel
+        before = anchor if isinstance(anchor, discord.Message) else None
+        if channel is not None:
+            augmented = await augment_prompt_with_thread(
+                job.agent_prompt,
+                channel=channel,
+                before_message=before,
+                bot_user_id=self.bot.user.id,
+            )
+        else:
+            augmented = job.agent_prompt
+        outcome = await self.bot.cursor.steer(
+            agent_id=job.agent_id,
+            prompt=augmented.sdk_message(),
+        )
+        if outcome.delivery in {"unavailable", "error"}:
+            self.bot.turns.enqueue_pending(job)
+            if anchor is not None and self.bot.turns.should_ack_queue(
+                job.agent_id, anchor.channel.id
+            ):
+                await anchor.reply(
+                    coalesce_ack(merged_count=job.coalesce_count),
+                    mention_author=False,
+                )
+            return
+        if anchor is not None and self.bot.turns.should_ack_queue(
+            job.agent_id, anchor.channel.id
+        ):
+            await anchor.reply(steer_ack(outcome), mention_author=False)
 
     async def _ack_queued_follow_up(self, job: FollowUpJob, depth: int) -> None:
         anchor = job.user_message

@@ -4,14 +4,16 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable, TypeVar
 
-from bot.multimodal import AgentPrompt, coalesce_ack, merge_agent_prompts
+from bot.multimodal import AgentPrompt, merge_agent_prompts
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+STEER_DEBOUNCE_SEC = 0.35
 
 
 class AgentBusyError(Exception):
@@ -21,11 +23,6 @@ class AgentBusyError(Exception):
 def is_agent_busy_error(exc: BaseException) -> bool:
     text = str(exc).lower()
     return "agent_busy" in text or "active run" in text
-
-
-def chat_queue_ack(*, depth: int) -> str:
-    """Back-compat alias — prefer coalesce_ack from multimodal."""
-    return coalesce_ack(merged_count=depth)
 
 
 @dataclass
@@ -45,15 +42,25 @@ class _CoalesceSlot:
     prompts: list[AgentPrompt]
 
 
+@dataclass
+class _SteerBatch:
+    job: FollowUpJob
+    prompts: list[AgentPrompt] = field(default_factory=list)
+
+
 class TurnCoordinator:
-    """One cloud turn at a time per bc- id; queue Discord follow-ups while busy."""
+    """One cloud turn at a time per bc- id; steer busy runs via Cloud API."""
 
     def __init__(self) -> None:
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._pending: dict[str, _CoalesceSlot | None] = {}
+        self._steer_batches: dict[str, _SteerBatch] = {}
+        self._steer_tasks: dict[str, asyncio.Task[None]] = {}
         self._last_queue_ack: dict[tuple[str, int], float] = {}
         self._start: Callable[[FollowUpJob], Awaitable[None]] | None = None
         self._ack: Callable[[FollowUpJob, int], Awaitable[None]] | None = None
+        self._steer: Callable[[FollowUpJob], Awaitable[None]] | None = None
+        self._is_run_active: Callable[[str], bool] | None = None
         self._busy_retries: dict[str, int] = defaultdict(int)
 
     def set_follow_up_handlers(
@@ -64,6 +71,15 @@ class TurnCoordinator:
     ) -> None:
         self._start = start
         self._ack = ack
+
+    def set_steer_handler(
+        self,
+        *,
+        steer: Callable[[FollowUpJob], Awaitable[None]],
+        is_run_active: Callable[[str], bool],
+    ) -> None:
+        self._steer = steer
+        self._is_run_active = is_run_active
 
     def lock(self, agent_id: str) -> asyncio.Lock:
         return self._locks[agent_id]
@@ -96,6 +112,23 @@ class TurnCoordinator:
 
     def clear_pending(self, agent_id: str) -> None:
         self._pending.pop(agent_id, None)
+        self._steer_batches.pop(agent_id, None)
+        task = self._steer_tasks.pop(agent_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def enqueue_pending(self, job: FollowUpJob) -> None:
+        """Fallback when steer fails — wait for the current turn to finish."""
+        agent_id = job.agent_id
+        slot = self._pending.get(agent_id)
+        if slot is None:
+            self._pending[agent_id] = _CoalesceSlot(
+                job=job, prompts=[job.agent_prompt]
+            )
+            return
+        slot.prompts.append(job.agent_prompt)
+        slot.job.agent_prompt = merge_agent_prompts(slot.prompts)
+        slot.job.coalesce_count = len(slot.prompts)
 
     async def submit_follow_up(
         self,
@@ -107,22 +140,76 @@ class TurnCoordinator:
         agent_id = job.agent_id
         lock = self._locks[agent_id]
         if lock.locked():
-            slot = self._pending.get(agent_id)
-            if slot is None:
-                self._pending[agent_id] = _CoalesceSlot(
-                    job=job, prompts=[job.agent_prompt]
-                )
-                await ack(job, 1)
+            active = self._is_run_active is not None and self._is_run_active(
+                agent_id
+            )
+            if active and self._steer is not None:
+                await self._schedule_steer(job)
                 return
-            slot.prompts.append(job.agent_prompt)
-            if job.user_message is not None:
-                slot.job.user_message = job.user_message
-            merged = merge_agent_prompts(slot.prompts)
-            slot.job.agent_prompt = merged
-            slot.job.coalesce_count = len(slot.prompts)
-            await ack(slot.job, slot.job.coalesce_count)
+            await self._coalesce_while_busy(job, ack=ack)
             return
         await self._drain(agent_id, job, start=start, ack=ack)
+
+    async def _schedule_steer(self, job: FollowUpJob) -> None:
+        agent_id = job.agent_id
+        batch = self._steer_batches.get(agent_id)
+        if batch is None:
+            batch = _SteerBatch(job=job, prompts=[job.agent_prompt])
+            self._steer_batches[agent_id] = batch
+        else:
+            batch.prompts.append(job.agent_prompt)
+            if job.user_message is not None:
+                batch.job.user_message = job.user_message
+        prior = self._steer_tasks.pop(agent_id, None)
+        if prior is not None and not prior.done():
+            prior.cancel()
+
+        async def _fire() -> None:
+            try:
+                await asyncio.sleep(STEER_DEBOUNCE_SEC)
+                await self._flush_steer(agent_id)
+            except asyncio.CancelledError:
+                return
+
+        self._steer_tasks[agent_id] = asyncio.create_task(_fire())
+
+    async def _flush_steer(self, agent_id: str) -> None:
+        batch = self._steer_batches.pop(agent_id, None)
+        self._steer_tasks.pop(agent_id, None)
+        if batch is None or self._steer is None:
+            return
+        merged = merge_agent_prompts(batch.prompts)
+        out = batch.job
+        out.agent_prompt = merged
+        out.coalesce_count = len(batch.prompts)
+        try:
+            await self._steer(out)
+        except Exception:  # noqa: BLE001
+            logger.exception("steer handler failed for %s", agent_id)
+            self._pending[agent_id] = _CoalesceSlot(
+                job=out, prompts=list(batch.prompts)
+            )
+
+    async def _coalesce_while_busy(
+        self,
+        job: FollowUpJob,
+        *,
+        ack: Callable[[FollowUpJob, int], Awaitable[None]],
+    ) -> None:
+        agent_id = job.agent_id
+        slot = self._pending.get(agent_id)
+        if slot is None:
+            self._pending[agent_id] = _CoalesceSlot(
+                job=job, prompts=[job.agent_prompt]
+            )
+            await ack(job, 1)
+            return
+        slot.prompts.append(job.agent_prompt)
+        if job.user_message is not None:
+            slot.job.user_message = job.user_message
+        slot.job.agent_prompt = merge_agent_prompts(slot.prompts)
+        slot.job.coalesce_count = len(slot.prompts)
+        await ack(slot.job, slot.job.coalesce_count)
 
     async def _drain(
         self,
@@ -165,7 +252,7 @@ class TurnCoordinator:
                     job.coalesce_count = len(slot.prompts)
 
     def should_ack_queue(self, agent_id: str, channel_id: int) -> bool:
-        """Debounce queue acks so rapid messages don't spam the thread."""
+        """Debounce acks so rapid messages don't spam the thread."""
         key = (agent_id, channel_id)
         now = time.monotonic()
         last = self._last_queue_ack.get(key, 0.0)

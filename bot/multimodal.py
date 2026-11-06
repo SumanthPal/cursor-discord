@@ -87,11 +87,12 @@ def merge_agent_prompts(prompts: list[AgentPrompt]) -> AgentPrompt:
 
 
 def coalesce_ack(*, merged_count: int) -> str:
+    """Fallback when steer is unavailable and we must wait for the turn to end."""
     if merged_count <= 1:
-        return "Still working — I'll fold this into the current turn when I can."
+        return "Still working — I'll handle this after the current turn."
     return (
         f"Still working — I'll combine your last **{merged_count}** messages "
-        "into the next turn."
+        "after the current turn."
     )
 
 

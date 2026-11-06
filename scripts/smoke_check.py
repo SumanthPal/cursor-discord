@@ -17,10 +17,8 @@ from bot.agent_ref import (  # noqa: E402
     parse_agent_ref_from_embed,
     parse_ref_spoiler,
 )
-from bot.turn_coordinator import (  # noqa: E402
-    chat_queue_ack,
-    is_agent_busy_error,
-)
+from bot.turn_coordinator import is_agent_busy_error  # noqa: E402
+from bot.multimodal import coalesce_ack  # noqa: E402
 from bot.discord_text import chunk_discord_lines  # noqa: E402
 from bot.cloud_artifacts import (  # noqa: E402
     artifact_filename,
@@ -308,9 +306,18 @@ def test_follow_up_queue() -> None:
         Exception("failed_precondition: [agent_busy] Agent already has an active run")
     )
     assert not is_agent_busy_error(Exception("network timeout"))
-    assert "fold" in chat_queue_ack(depth=1).lower()
-    assert "3" in chat_queue_ack(depth=3)
+    assert "turn" in coalesce_ack(merged_count=1).lower()
+    assert "3" in coalesce_ack(merged_count=3)
     print("ok follow_up_queue")
+
+
+def test_cloud_steer_payload() -> None:
+    from bot.cloud_steer import prompt_to_steer_payload, steer_ack
+    from bot.cloud_steer import SteerOutcome
+
+    assert prompt_to_steer_payload("hi") == {"text": "hi"}
+    assert "redirect" in steer_ack(SteerOutcome("steered")).lower()
+    print("ok cloud_steer_payload")
 
 
 def test_cursor_parse() -> None:
@@ -407,6 +414,7 @@ def main() -> None:
     test_cloud_artifacts()
     test_chat_status_trailer()
     test_follow_up_queue()
+    test_cloud_steer_payload()
     test_cursor_parse()
     test_chat_repo_reply()
     test_repo_refs()
