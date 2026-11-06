@@ -216,8 +216,8 @@ async def resolve_agent_ref_in_channel(
     thread_agents: dict[int, AgentRef] | None = None,
     limit: int = 50,
 ) -> AgentRef | None:
-    """Prefer live thread binding (active runs hide ids in message text)."""
-    if isinstance(channel, discord.Thread):
+    """Prefer live binding while runs are active (status text may omit bc- ids)."""
+    if isinstance(channel, (discord.Thread, discord.DMChannel)):
         cached = thread_agent_ref(channel.id, thread_agents)
         if cached is not None:
             return cached

@@ -17,10 +17,8 @@ from bot.agent_ref import (  # noqa: E402
     parse_agent_ref_from_embed,
     parse_ref_spoiler,
 )
-from bot.turn_coordinator import (  # noqa: E402
-    chat_queue_ack,
-    is_agent_busy_error,
-)
+from bot.turn_coordinator import is_agent_busy_error  # noqa: E402
+from bot.multimodal import coalesce_ack  # noqa: E402
 from bot.discord_text import chunk_discord_lines  # noqa: E402
 from bot.cloud_artifacts import (  # noqa: E402
     artifact_filename,
@@ -220,6 +218,7 @@ def test_policy() -> None:
         id = 2
 
     assert policy.authorize(user=BadU(), guild=G(), consume_rate=False) is not None
+    assert policy.authorize(user=U(), guild=None, consume_rate=False) is None
     assert not policy.is_admin(U())
 
     class Role:
@@ -288,7 +287,9 @@ def test_multimodal_prompt() -> None:
 
 
 def test_thread_agent_ref() -> None:
-    from bot.agent_ref import AgentRef, thread_agent_ref
+    import asyncio
+
+    from bot.agent_ref import AgentRef, resolve_agent_ref_in_channel, thread_agent_ref
 
     agent_id = "bc-00000000-0000-0000-0000-000000000001"
     mapping = {
@@ -298,6 +299,15 @@ def test_thread_agent_ref() -> None:
     assert ref is not None and ref.agent_id == agent_id and ref.run_id == "run-live"
     assert thread_agent_ref(99, mapping) is None
     assert thread_agent_ref(42, None) is None
+
+    dm = object.__new__(discord.DMChannel)
+    dm.id = 42  # type: ignore[attr-defined]
+    cached = asyncio.run(
+        resolve_agent_ref_in_channel(
+            dm, bot_user_id=1, thread_agents=mapping
+        )
+    )
+    assert cached is not None and cached.agent_id == agent_id
     print("ok thread_agent_ref")
 
 
@@ -332,9 +342,39 @@ def test_follow_up_queue() -> None:
         Exception("failed_precondition: [agent_busy] Agent already has an active run")
     )
     assert not is_agent_busy_error(Exception("network timeout"))
-    assert "next" in chat_queue_ack(depth=1)
-    assert "#3" in chat_queue_ack(depth=3)
+    assert "turn" in coalesce_ack(merged_count=1).lower()
+    assert "3" in coalesce_ack(merged_count=3)
     print("ok follow_up_queue")
+
+
+def test_cloud_steer_payload() -> None:
+    from bot.cloud_steer import prompt_to_steer_payload, steer_ack
+    from bot.cloud_steer import SteerOutcome
+
+    assert prompt_to_steer_payload("hi") == {"text": "hi"}
+    assert "redirect" in steer_ack(SteerOutcome("steered")).lower()
+    print("ok cloud_steer_payload")
+
+
+def test_cursor_parse() -> None:
+    from bot.cursor_parse import MentionKind, parse_mention, strip_inline_options
+
+    parsed = parse_mention("help")
+    assert parsed.kind == MentionKind.HELP
+    assert parse_mention("").kind == MentionKind.PROMPT
+    assert parse_mention("settings.json is broken").kind == MentionKind.PROMPT
+    assert parse_mention("settings repos:acme/a").kind == MentionKind.SETTINGS
+    parsed2 = parse_mention('repo=acme/app branch=dev autopr=false fix ci')
+    assert parsed2.options.repo.endswith("/acme/app")
+    assert parsed2.options.branch == "dev"
+    assert parsed2.options.auto_create_pr is False
+    assert parsed2.prompt == "fix ci"
+    parsed3 = parse_mention("agent try a new approach")
+    assert parsed3.kind == MentionKind.FORCE_AGENT
+    opts, rest = strip_inline_options('model="composer-2.5" ship it')
+    assert opts.model == "composer-2.5"
+    assert rest == "ship it"
+    print("ok cursor_parse")
 
 
 def test_chat_repo_reply() -> None:
@@ -414,6 +454,8 @@ def main() -> None:
     test_thread_agent_ref()
     test_chat_status_trailer()
     test_follow_up_queue()
+    test_cloud_steer_payload()
+    test_cursor_parse()
     test_chat_repo_reply()
     test_repo_refs()
     test_activity_snippet()

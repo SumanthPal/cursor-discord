@@ -2,7 +2,7 @@
 
 Discord → [Cursor cloud agents](https://cursor.com/docs/cloud-agent/api/endpoints).
 
-**Use:** `@Cursor owner/repo <prompt>` or `/ask` (optional PNG/JPEG/GIF/WebP) · a thread branches from your `@Cursor` message (or a `/ask` anchor) — plain-text replies inside it; I **queue** follow-ups if a run is still active · `/cancel` to stop · PR links in replies · demo artifacts post when a run finishes (`/artifacts` to retry).
+**Use:** `@Cursor` with Slack-style options (`repo=`, `branch=`, `model=`, `autopr=false`) · thread per run · busy follow-ups **steer** the live run (Cloud API `delivery: "steer"`) · `@Cursor agent …` for a new agent · `@Cursor settings` / `list my agents` / `help` · DMs allow follow-ups without `@` · `/ask`, `/cancel`, `/status`, `/artifacts` · PR links + demo artifacts when a run finishes.
 
 If several repos are allowed, I ask in chat — reply with `owner/repo` or a GitHub URL (no dropdown).
 

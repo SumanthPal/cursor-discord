@@ -18,6 +18,7 @@ from cursor_sdk import (
     UserMessage,
 )
 
+from bot.cloud_steer import SteerOutcome, post_steer
 from bot.turn_coordinator import AgentBusyError, is_agent_busy_error
 
 AgentMessage = str | UserMessage
@@ -124,6 +125,21 @@ class CursorAgentService:
                 result = close()
                 if hasattr(result, "__await__"):
                     await result  # type: ignore[misc]
+
+    def is_run_active(self, agent_id: str) -> bool:
+        return agent_id in self._active_runs
+
+    async def steer(
+        self,
+        *,
+        agent_id: str,
+        prompt: AgentMessage,
+    ) -> SteerOutcome:
+        return await post_steer(
+            api_key=self.api_key,
+            agent_id=agent_id,
+            message=prompt if isinstance(prompt, (str, UserMessage)) else str(prompt),
+        )
 
     async def follow_up(
         self,

@@ -59,6 +59,43 @@ class AgentPrompt:
         return self.actionable
 
 
+def merge_agent_prompts(prompts: list[AgentPrompt]) -> AgentPrompt:
+    """Merge coalesced Discord messages into one cloud agent turn."""
+    if not prompts:
+        return AgentPrompt.from_text("")
+    if len(prompts) == 1:
+        return prompts[0]
+    chunks: list[str] = []
+    images: list[SDKImage] = []
+    feedback_parts: list[str] = []
+    for p in prompts:
+        if p.text and p.text.strip():
+            chunks.append(p.text.strip())
+        images.extend(p.images)
+        if p.feedback:
+            feedback_parts.append(p.feedback)
+    images = images[:MAX_IMAGES]
+    text = "\n\n".join(chunks)
+    if not text and images:
+        text = _EMPTY_TEXT_PLACEHOLDER
+    return AgentPrompt(
+        text=text,
+        images=tuple(images),
+        actionable=bool(text or images),
+        feedback="\n".join(feedback_parts),
+    )
+
+
+def coalesce_ack(*, merged_count: int) -> str:
+    """Fallback when steer is unavailable and we must wait for the turn to end."""
+    if merged_count <= 1:
+        return "Still working — I'll handle this after the current turn."
+    return (
+        f"Still working — I'll combine your last **{merged_count}** messages "
+        "after the current turn."
+    )
+
+
 def _attachment_mime(attachment: discord.Attachment) -> str | None:
     ctype = (attachment.content_type or "").split(";", 1)[0].strip().lower()
     if ctype:

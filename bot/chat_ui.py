@@ -93,9 +93,17 @@ class ChatStatusEditor:
         self._last_edit = 0.0
         self._last_body = ""
 
-    async def set_content(self, body: str, *, force: bool = False) -> None:
+    async def set_content(
+        self,
+        body: str,
+        *,
+        force: bool = False,
+        embed: discord.Embed | None = None,
+        view: discord.ui.View | None = None,
+    ) -> None:
         body = clip_discord(body)
-        if body == self._last_body:
+        signature = (body, embed.to_dict() if embed else None, view is not None)
+        if signature == getattr(self, "_last_signature", None) and not force:
             return
         now = time.monotonic()
         if (
@@ -105,8 +113,9 @@ class ChatStatusEditor:
         ):
             return
         try:
-            await self.message.edit(content=body, embed=None, view=None)
+            await self.message.edit(content=body or None, embed=embed, view=view)
             self._last_body = body
+            self._last_signature = signature
             self._last_edit = now
         except discord.HTTPException:
             pass
