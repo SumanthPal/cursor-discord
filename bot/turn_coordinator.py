@@ -70,6 +70,33 @@ class TurnCoordinator:
         self._is_run_active: Callable[[str], bool] | None = None
         self._busy_retries: dict[str, int] = defaultdict(int)
 
+    def _shelve_pending_steer(self, agent_id: str) -> None:
+        """Move debounced steer state into the coalesce queue (PR-watch system turn)."""
+        task = self._steer_tasks.pop(agent_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        batch = self._steer_batches.pop(agent_id, None)
+        if batch is None:
+            return
+        merged = merge_agent_prompts(batch.prompts)
+        out = batch.job
+        out.agent_prompt = merged
+        out.coalesce_count = len(batch.prompts)
+        out.coalesce_anchor = batch.first_message
+        slot = self._pending.get(agent_id)
+        if slot is None:
+            self._pending[agent_id] = _CoalesceSlot(
+                job=out,
+                prompts=[out.agent_prompt],
+                first_message=batch.first_message,
+            )
+        else:
+            slot.prompts.append(out.agent_prompt)
+            slot.job.agent_prompt = merge_agent_prompts(slot.prompts)
+            slot.job.coalesce_count = len(slot.prompts)
+            if batch.first_message is not None:
+                slot.first_message = batch.first_message
+
     def set_follow_up_handlers(
         self,
         *,
@@ -237,6 +264,26 @@ class TurnCoordinator:
         self._steer_tasks.pop(agent_id, None)
         if batch is None or self._steer is None:
             return
+        if agent_id in self._system_turn_active:
+            merged = merge_agent_prompts(batch.prompts)
+            out = batch.job
+            out.agent_prompt = merged
+            out.coalesce_count = len(batch.prompts)
+            out.coalesce_anchor = batch.first_message
+            slot = self._pending.get(agent_id)
+            if slot is None:
+                self._pending[agent_id] = _CoalesceSlot(
+                    job=out,
+                    prompts=[out.agent_prompt],
+                    first_message=batch.first_message,
+                )
+            else:
+                slot.prompts.append(out.agent_prompt)
+                slot.job.agent_prompt = merge_agent_prompts(slot.prompts)
+                slot.job.coalesce_count = len(slot.prompts)
+                if batch.first_message is not None:
+                    slot.first_message = batch.first_message
+            return
         merged = merge_agent_prompts(batch.prompts)
         out = batch.job
         out.agent_prompt = merged
@@ -283,33 +330,37 @@ class TurnCoordinator:
         async with lock:
             job: FollowUpJob | None = first
             while job is not None:
-                if job.system_turn:
+                sys_turn = job.system_turn
+                if sys_turn:
                     self._system_turn_active.add(agent_id)
-                finished = False
-                while not finished:
-                    try:
-                        await start(job)
-                        self._busy_retries[agent_id] = 0
-                        finished = True
-                    except AgentBusyError:
-                        retries = self._busy_retries[agent_id] + 1
-                        self._busy_retries[agent_id] = retries
-                        if retries > 30:
-                            logger.error(
-                                "giving up on follow-up for %s after agent_busy retries",
-                                agent_id,
-                            )
+                    self._shelve_pending_steer(agent_id)
+                try:
+                    finished = False
+                    while not finished:
+                        try:
+                            await start(job)
                             self._busy_retries[agent_id] = 0
                             finished = True
-                        else:
-                            logger.info(
-                                "agent busy for %s — retry %s/30",
-                                agent_id,
-                                retries,
-                            )
-                            await asyncio.sleep(2.0)
-                if job.system_turn:
-                    self._system_turn_active.discard(agent_id)
+                        except AgentBusyError:
+                            retries = self._busy_retries[agent_id] + 1
+                            self._busy_retries[agent_id] = retries
+                            if retries > 30:
+                                logger.error(
+                                    "giving up on follow-up for %s after agent_busy retries",
+                                    agent_id,
+                                )
+                                self._busy_retries[agent_id] = 0
+                                finished = True
+                            else:
+                                logger.info(
+                                    "agent busy for %s — retry %s/30",
+                                    agent_id,
+                                    retries,
+                                )
+                                await asyncio.sleep(2.0)
+                finally:
+                    if sys_turn:
+                        self._system_turn_active.discard(agent_id)
                 slot = self._pending.pop(agent_id, None)
                 if slot is None:
                     job = None
