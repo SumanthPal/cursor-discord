@@ -200,6 +200,29 @@ async def find_agent_ref_in_channel(
     return None
 
 
+def bind_thread_agent_ref(
+    prev: AgentRef | None,
+    *,
+    agent_id: str,
+    run_id: str | None = None,
+    repo: str | None = None,
+    project: str | None = None,
+) -> AgentRef:
+    same_agent = prev is not None and prev.agent_id == agent_id
+    if run_id is not None:
+        bound_run_id = run_id
+    elif same_agent and prev is not None:
+        bound_run_id = prev.run_id
+    else:
+        bound_run_id = None
+    return AgentRef(
+        agent_id=agent_id,
+        run_id=bound_run_id,
+        repo=repo or (prev.repo if prev else None),
+        project=project or (prev.project if prev else None),
+    )
+
+
 def thread_agent_ref(
     thread_id: int | None,
     thread_agents: dict[int, AgentRef] | None,

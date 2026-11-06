@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.agent_ref import (
-    AgentRef,
+    bind_thread_agent_ref,
     chat_failed,
     is_agent_id,
     resolve_agent_ref_in_channel,
@@ -1174,11 +1174,12 @@ class AgentCog(commands.Cog):
         if not is_agent_id(agent_id):
             return
         prev = self.bot.thread_agents.get(thread.id)
-        self.bot.thread_agents[thread.id] = AgentRef(
+        self.bot.thread_agents[thread.id] = bind_thread_agent_ref(
+            prev,
             agent_id=agent_id,
-            run_id=run_id if run_id is not None else (prev.run_id if prev else None),
-            repo=repo or (prev.repo if prev else None),
-            project=project or (prev.project if prev else None),
+            run_id=run_id,
+            repo=repo,
+            project=project,
         )
 
     async def _deliver_artifacts(

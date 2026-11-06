@@ -288,9 +288,10 @@ def test_multimodal_prompt() -> None:
 
 
 def test_thread_agent_ref() -> None:
-    from bot.agent_ref import AgentRef, thread_agent_ref
+    from bot.agent_ref import AgentRef, bind_thread_agent_ref, thread_agent_ref
 
     agent_id = "bc-00000000-0000-0000-0000-000000000001"
+    other_id = "bc-00000000-0000-0000-0000-000000000002"
     mapping = {
         42: AgentRef(agent_id=agent_id, run_id="run-live", repo="https://github.com/acme/app")
     }
@@ -298,6 +299,12 @@ def test_thread_agent_ref() -> None:
     assert ref is not None and ref.agent_id == agent_id and ref.run_id == "run-live"
     assert thread_agent_ref(99, mapping) is None
     assert thread_agent_ref(42, None) is None
+
+    prev = AgentRef(agent_id=agent_id, run_id="run-old")
+    same = bind_thread_agent_ref(prev, agent_id=agent_id)
+    assert same.run_id == "run-old"
+    rebound = bind_thread_agent_ref(prev, agent_id=other_id)
+    assert rebound.agent_id == other_id and rebound.run_id is None
     print("ok thread_agent_ref")
 
 
