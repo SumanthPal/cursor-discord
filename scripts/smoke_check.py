@@ -205,6 +205,7 @@ def test_policy() -> None:
             rate_limit_max=2,
             rate_limit_window_sec=60,
             bridge_workspace="/tmp/x",
+            watch_pr_events=True,
         )
         base.update(overrides)
         return Settings(**base)  # type: ignore[arg-type]
@@ -410,6 +411,26 @@ def test_repo_refs() -> None:
     print("ok repo_refs")
 
 
+def test_pr_subscribe() -> None:
+    from bot.pr_subscribe import (
+        PR_WATCH_MARKER,
+        is_pr_watch_prompt,
+        pr_watch_followup_text,
+        user_opted_out_of_pr_watch,
+    )
+
+    url = "https://github.com/acme/app/pull/42"
+    text = pr_watch_followup_text(pr_url=url, branch="cursor/foo")
+    assert PR_WATCH_MARKER in text
+    assert url in text
+    assert "subscribe_github_pr" in text
+    assert is_pr_watch_prompt(text)
+    assert not is_pr_watch_prompt("fix the bug")
+    assert user_opted_out_of_pr_watch("@Cursor no-watch ship it")
+    assert not user_opted_out_of_pr_watch("ship it")
+    print("ok pr_subscribe")
+
+
 def test_activity_snippet() -> None:
     from types import SimpleNamespace
 
@@ -458,6 +479,7 @@ def main() -> None:
     test_cursor_parse()
     test_chat_repo_reply()
     test_repo_refs()
+    test_pr_subscribe()
     test_activity_snippet()
     print("ALL SMOKE CHECKS PASSED")
 

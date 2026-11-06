@@ -38,6 +38,13 @@ from bot.chat_ui import ChatStatusEditor, chat_ack, chat_status_body
 from bot.discord_text import clip_discord, chunk_discord_lines
 from bot.cloud_artifacts import deliver_new_cloud_artifacts
 from bot.cloud_steer import steer_ack
+from bot.cursor_agent import RunOutcome
+from bot.pr_subscribe import (
+    is_pr_watch_prompt,
+    pr_watch_agent_prompt,
+    pr_watch_discord_ack,
+    user_opted_out_of_pr_watch,
+)
 from bot.multimodal import AgentPrompt, agent_prompt_from_message, coalesce_ack
 from bot.projects import (
     Project,
@@ -71,6 +78,7 @@ HELP_TEXT = """**Cursor** — cloud agents in Discord (Slack-style)
 • In **DMs**, reply in the thread **without** `@Cursor` · in **channels**, `@Cursor` each follow-up
 • While I'm busy, extra messages **redirect the current run** (API steer) · `stop` cancels
 • `/ask` / `/cancel` / `/status` / `/artifacts` also work · PR + demo artifacts when a run finishes
+• After a PR opens, the agent auto-subscribes to **PR review events** (pub/sub) unless you say `no-watch`
 
 **Admins** (`SUPERUSER_IDS`): `/setup`, `/grant`, `/revoke` · Open runs: {dashboard}
 """
@@ -1606,6 +1614,62 @@ class AgentCog(commands.Cog):
             project=project.alias,
         )
         await self._deliver_artifacts(thread, outcome.agent_id)
+        await self._maybe_enqueue_pr_watch(
+            thread=thread,
+            agent_id=outcome.agent_id,
+            outcome=outcome,
+            repo=project.repo,
+            project_alias=project.alias,
+            source_prompt=agent_prompt,
+        )
+
+    async def _maybe_enqueue_pr_watch(
+        self,
+        *,
+        thread: discord.Thread | discord.DMChannel,
+        agent_id: str,
+        outcome: RunOutcome,
+        repo: str,
+        project_alias: str | None,
+        source_prompt: AgentPrompt,
+    ) -> None:
+        if not self.bot.settings.watch_pr_events:
+            return
+        if not outcome.pr_url or not is_agent_id(agent_id):
+            return
+        if is_pr_watch_prompt(source_prompt.text):
+            return
+        if user_opted_out_of_pr_watch(source_prompt.text):
+            return
+        status_key = (outcome.status or "").lower()
+        if status_key in {"error", "cancelled", "canceled"}:
+            return
+        if self.bot.pr_watch_enrolled.get(agent_id) == outcome.pr_url:
+            return
+        self.bot.pr_watch_enrolled[agent_id] = outcome.pr_url
+
+        try:
+            status_msg = await thread.send(
+                chat_ack(prompt=pr_watch_discord_ack(), repo=repo, echo_prompt=True)
+            )
+        except discord.HTTPException:
+            logger.exception("failed to post PR watch ack in thread %s", thread.id)
+            return
+
+        job = FollowUpJob(
+            agent_id=agent_id,
+            agent_prompt=pr_watch_agent_prompt(
+                pr_url=outcome.pr_url, branch=outcome.branch
+            ),
+            repo=repo,
+            project_alias=project_alias,
+            status_message=status_msg,
+        )
+        await self.bot.turns.submit_follow_up(
+            job,
+            start=self._start_queued_follow_up,
+            ack=self._ack_queued_follow_up,
+        )
 
     def _bind_thread_agent(
         self,
@@ -1797,17 +1861,20 @@ class AgentCog(commands.Cog):
                 repo=repo if repo != "(existing agent)" else None,
                 project=project_alias,
             )
-        history_before = _history_before_for_follow_up(
-            coalesce_count=coalesce_count,
-            coalesce_anchor=coalesce_anchor,
-            anchor=anchor_message,
-        )
-        augmented = await augment_prompt_with_thread(
-            agent_prompt,
-            channel=status_message.channel,
-            before_message=history_before or status_message,
-            bot_user_id=self.bot.user.id,
-        )
+        if is_pr_watch_prompt(agent_prompt.text):
+            augmented = agent_prompt
+        else:
+            history_before = _history_before_for_follow_up(
+                coalesce_count=coalesce_count,
+                coalesce_anchor=coalesce_anchor,
+                anchor=anchor_message,
+            )
+            augmented = await augment_prompt_with_thread(
+                agent_prompt,
+                channel=status_message.channel,
+                before_message=history_before or status_message,
+                bot_user_id=self.bot.user.id,
+            )
 
         async def on_status(state: str, data: dict) -> None:
             self.bot.sessions.set_status(agent_id, state)
@@ -1884,6 +1951,14 @@ class AgentCog(commands.Cog):
                 project=project_alias,
             )
             await self._deliver_artifacts(thread, outcome.agent_id)
+        await self._maybe_enqueue_pr_watch(
+            thread=thread,
+            agent_id=outcome.agent_id,
+            outcome=outcome,
+            repo=repo,
+            project_alias=project_alias,
+            source_prompt=agent_prompt,
+        )
 
 
 # discord.Message uses __slots__, so the last reaction is tracked here by message id.

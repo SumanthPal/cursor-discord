@@ -6,6 +6,13 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _csv_ids(raw: str | None) -> frozenset[int]:
     if not raw or not raw.strip():
         return frozenset()
@@ -35,6 +42,7 @@ class Settings:
     rate_limit_max: int
     rate_limit_window_sec: float
     bridge_workspace: str
+    watch_pr_events: bool
 
 
 def load_settings() -> Settings:
@@ -73,4 +81,5 @@ def load_settings() -> Settings:
         bridge_workspace=os.environ.get(
             "BRIDGE_WORKSPACE", "/tmp/cursor-discord-bridge"
         ),
+        watch_pr_events=_env_bool("WATCH_PR_EVENTS", True),
     )

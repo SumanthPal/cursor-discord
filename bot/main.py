@@ -51,6 +51,8 @@ class CursorDiscordBot(commands.Bot):
         self.sessions = SessionRegistry()
         # Agent thread id → ref while runs are live (message text omits bc- ids).
         self.thread_agents: dict[int, AgentRef] = {}
+        # bc- id → PR URL already enrolled in pub/sub watch follow-up
+        self.pr_watch_enrolled: dict[str, str] = {}
         self.turns = turns or TurnCoordinator()
         self._http_runner: web.AppRunner | None = None
 
