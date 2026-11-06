@@ -15,6 +15,7 @@ from bot.agent_cards import (
     launch_embed,
 )
 from bot.agent_ref import (
+    AgentRef,
     chat_failed,
     find_agent_ref_in_channel,
     is_agent_id,
@@ -739,6 +740,76 @@ class AgentCog(commands.Cog):
             mention_author=False,
         )
 
+    async def _handle_dm_agent_message(
+        self, message: discord.Message, ref: AgentRef
+    ) -> bool:
+        """DM thread with an existing agent. Returns True if consumed."""
+        if self._get_pending_repo(message.channel.id, message.author.id) is not None:
+            return True
+
+        mentioned = self.bot.user in message.mentions
+        prompt_text = (
+            _strip_mention(message.content, self.bot.user)
+            if mentioned
+            else message.content.strip()
+        )
+
+        if mentioned:
+            parsed = parse_mention(prompt_text)
+            if parsed.kind == MentionKind.HELP:
+                await self._reply_help(message)
+                return True
+            if parsed.kind == MentionKind.SETTINGS:
+                await self._reply_settings(message, parsed.settings_repos)
+                return True
+            if parsed.kind == MentionKind.LIST_AGENTS:
+                await self._reply_list_agents(message)
+                return True
+            if parsed.kind == MentionKind.STOP:
+                denied = self.bot.policy.authorize(
+                    user=message.author, guild=message.guild
+                )
+                if denied:
+                    await message.reply(denied, mention_author=False)
+                    return True
+                await self._handle_stop_in_thread(
+                    message, agent_id=ref.agent_id, run_id=ref.run_id
+                )
+                return True
+            if parsed.kind == MentionKind.FORCE_AGENT:
+                prompt_text = parsed.prompt
+            elif parsed.kind == MentionKind.PROMPT:
+                prompt_text = parsed.prompt
+            elif _is_bot_mention_only(message, self.bot.user):
+                await self._reply_help(message)
+                return True
+
+        if not (prompt_text or message.attachments) or prompt_text.startswith("/"):
+            return mentioned
+
+        denied = self.bot.policy.authorize(
+            user=message.author, guild=message.guild
+        )
+        if denied:
+            await message.reply(denied, mention_author=False)
+            return True
+
+        agent_prompt = await agent_prompt_from_message(message, text=prompt_text)
+        if not agent_prompt.has_content:
+            if agent_prompt.feedback:
+                await message.reply(
+                    clip_discord(agent_prompt.feedback), mention_author=False
+                )
+            return True
+        await self._follow_up_message(
+            message=message,
+            agent_id=ref.agent_id,
+            agent_prompt=agent_prompt,
+            repo=ref.repo or "(existing agent)",
+            project_alias=ref.project,
+        )
+        return True
+
     async def _launch_from_switch(
         self,
         *,
@@ -804,36 +875,9 @@ class AgentCog(commands.Cog):
             )
             return
 
-        # DM follow-ups without @Cursor (Slack DM parity)
-        if (
-            isinstance(message.channel, discord.DMChannel)
-            and ref
-            and self.bot.user not in message.mentions
-        ):
-            if self._get_pending_repo(message.channel.id, message.author.id) is not None:
+        if isinstance(message.channel, discord.DMChannel) and ref:
+            if await self._handle_dm_agent_message(message, ref):
                 return
-            prompt_text = message.content.strip()
-            if (prompt_text or message.attachments) and not prompt_text.startswith(
-                "/"
-            ):
-                denied = self.bot.policy.authorize(
-                    user=message.author, guild=message.guild
-                )
-                if denied:
-                    await message.reply(denied, mention_author=False)
-                    return
-                agent_prompt = await agent_prompt_from_message(
-                    message, text=prompt_text
-                )
-                if agent_prompt.has_content:
-                    await self._follow_up_message(
-                        message=message,
-                        agent_id=ref.agent_id,
-                        agent_prompt=agent_prompt,
-                        repo=ref.repo or "(existing agent)",
-                        project_alias=ref.project,
-                    )
-                    return
 
         # Guild thread follow-ups — require @Cursor (Slack channel thread parity)
         if isinstance(message.channel, discord.Thread):
@@ -899,6 +943,18 @@ class AgentCog(commands.Cog):
                         project_alias=ref.project,
                     )
                     return
+
+        if isinstance(message.channel, discord.DMChannel):
+            if ref and self.bot.user in message.mentions:
+                return
+            if ref:
+                return
+            await message.reply(
+                "Start a cloud agent from a server channel with `@Cursor …`. "
+                "In this DM, reply **without** `@` to follow up once a run exists.",
+                mention_author=False,
+            )
+            return
 
         if self.bot.user not in message.mentions:
             return
@@ -1584,6 +1640,7 @@ class AgentCog(commands.Cog):
             project_alias=job.project_alias,
             anchor_message=anchor if isinstance(anchor, discord.Message) else None,
         )
+        await self.bot.turns.flush_pending_turn(job.agent_id)
 
     async def _steer_follow_up(self, job: FollowUpJob) -> None:
         assert self.bot.user is not None
@@ -1610,7 +1667,9 @@ class AgentCog(commands.Cog):
             agent_id=job.agent_id,
             prompt=augmented.sdk_message(),
         )
-        if outcome.delivery in {"unavailable", "error"}:
+        if outcome.delivery == "queued":
+            self.bot.turns.enqueue_pending(job)
+        elif outcome.delivery in {"unavailable", "error"}:
             self.bot.turns.enqueue_pending(job)
             if anchor is not None and self.bot.turns.should_ack_queue(
                 job.agent_id, anchor.channel.id

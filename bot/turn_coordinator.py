@@ -125,10 +125,31 @@ class TurnCoordinator:
             self._pending[agent_id] = _CoalesceSlot(
                 job=job, prompts=[job.agent_prompt]
             )
+        else:
+            slot.prompts.append(job.agent_prompt)
+            slot.job.agent_prompt = merge_agent_prompts(slot.prompts)
+            slot.job.coalesce_count = len(slot.prompts)
+        self._schedule_resume_after_active_run(job.agent_id)
+
+    async def flush_pending_turn(self, agent_id: str) -> None:
+        """Run queued follow-ups after a turn finishes (create or follow-up path)."""
+        await self._flush_pending(agent_id)
+
+    def _schedule_resume_after_active_run(self, agent_id: str) -> None:
+        if self._start is None or self._ack is None:
             return
-        slot.prompts.append(job.agent_prompt)
-        slot.job.agent_prompt = merge_agent_prompts(slot.prompts)
-        slot.job.coalesce_count = len(slot.prompts)
+        asyncio.create_task(self._resume_when_idle(agent_id))
+
+    async def _resume_when_idle(self, agent_id: str) -> None:
+        """Wait for the active run/lock, then flush pending follow-ups."""
+        for _ in range(600):
+            active = self._is_run_active is not None and self._is_run_active(
+                agent_id
+            )
+            if not active and not self._locks[agent_id].locked():
+                break
+            await asyncio.sleep(0.5)
+        await self._flush_pending(agent_id)
 
     async def submit_follow_up(
         self,
@@ -186,9 +207,7 @@ class TurnCoordinator:
             await self._steer(out)
         except Exception:  # noqa: BLE001
             logger.exception("steer handler failed for %s", agent_id)
-            self._pending[agent_id] = _CoalesceSlot(
-                job=out, prompts=list(batch.prompts)
-            )
+            self.enqueue_pending(out)
 
     async def _coalesce_while_busy(
         self,
@@ -250,6 +269,7 @@ class TurnCoordinator:
                     job = slot.job
                     job.agent_prompt = merge_agent_prompts(slot.prompts)
                     job.coalesce_count = len(slot.prompts)
+        await self._flush_pending(agent_id)
 
     def should_ack_queue(self, agent_id: str, channel_id: int) -> bool:
         """Debounce acks so rapid messages don't spam the thread."""
