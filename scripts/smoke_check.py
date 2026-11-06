@@ -287,7 +287,9 @@ def test_multimodal_prompt() -> None:
 
 
 def test_thread_agent_ref() -> None:
-    from bot.agent_ref import AgentRef, thread_agent_ref
+    import asyncio
+
+    from bot.agent_ref import AgentRef, resolve_agent_ref_in_channel, thread_agent_ref
 
     agent_id = "bc-00000000-0000-0000-0000-000000000001"
     mapping = {
@@ -297,6 +299,15 @@ def test_thread_agent_ref() -> None:
     assert ref is not None and ref.agent_id == agent_id and ref.run_id == "run-live"
     assert thread_agent_ref(99, mapping) is None
     assert thread_agent_ref(42, None) is None
+
+    dm = object.__new__(discord.DMChannel)
+    dm.id = 42  # type: ignore[attr-defined]
+    cached = asyncio.run(
+        resolve_agent_ref_in_channel(
+            dm, bot_user_id=1, thread_agents=mapping
+        )
+    )
+    assert cached is not None and cached.agent_id == agent_id
     print("ok thread_agent_ref")
 
 

@@ -1603,7 +1603,7 @@ class AgentCog(commands.Cog):
 
     def _bind_thread_agent(
         self,
-        thread: discord.Thread,
+        thread: discord.Thread | discord.DMChannel,
         *,
         agent_id: str,
         run_id: str | None = None,
