@@ -251,6 +251,14 @@ class AgentCog(commands.Cog):
         role = next(
             (r for r in guild.roles if r.name == name and not r.managed), None
         )
+        if not grant and (role is None or role not in member.roles):
+            msg = f"{member.mention} doesn't have the **{name}** role."
+            if member.id in self.bot.settings.allowed_user_ids:
+                msg += " They still have access via `ALLOWED_USER_IDS`."
+            elif self.bot.policy.is_admin(member):
+                msg += " They still have access as an admin via `SUPERUSER_IDS`."
+            await interaction.followup.send(msg, ephemeral=True)
+            return
         try:
             if grant:
                 if role is None:
@@ -258,7 +266,7 @@ class AgentCog(commands.Cog):
                         name=name, reason="Cursor bot access role"
                     )
                 await member.add_roles(role, reason=f"/grant by {interaction.user}")
-            elif role is not None:
+            else:
                 await member.remove_roles(role, reason=f"/revoke by {interaction.user}")
         except discord.Forbidden:
             await interaction.followup.send(
@@ -270,7 +278,9 @@ class AgentCog(commands.Cog):
             msg = f"{member.mention} can now use Cursor in channels set up with `/setup`."
         else:
             msg = f"Removed Cursor access from {member.mention}."
-        if self.bot.policy.is_admin(member) and not grant:
+        if not grant and member.id in self.bot.settings.allowed_user_ids:
+            msg += " (They still have access via `ALLOWED_USER_IDS`.)"
+        elif self.bot.policy.is_admin(member) and not grant:
             msg += " (They're still an admin via `SUPERUSER_IDS`.)"
         await interaction.followup.send(msg, ephemeral=True)
 
