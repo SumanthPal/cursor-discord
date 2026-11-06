@@ -1880,6 +1880,10 @@ class AgentCog(commands.Cog):
             await self._deliver_artifacts(thread, outcome.agent_id)
 
 
+# discord.Message uses __slots__, so the last reaction is tracked here by message id.
+_status_emoji_by_message: dict[int, str] = {}
+
+
 async def _set_status_reaction(message: discord.Message, status: str) -> None:
     key = (status or "").lower()
     if key in {"running", "streaming", "starting", "created"}:
@@ -1888,7 +1892,7 @@ async def _set_status_reaction(message: discord.Message, status: str) -> None:
         emoji = "❌"
     else:
         emoji = "✅"
-    if getattr(message, "_cursor_status_emoji", None) == emoji:
+    if _status_emoji_by_message.get(message.id) == emoji:
         return
     try:
         await message.clear_reactions()
@@ -1896,9 +1900,12 @@ async def _set_status_reaction(message: discord.Message, status: str) -> None:
         pass
     try:
         await message.add_reaction(emoji)
-        message._cursor_status_emoji = emoji  # type: ignore[attr-defined]
     except discord.HTTPException:
-        pass
+        return
+    if emoji == "⏳":
+        _status_emoji_by_message[message.id] = emoji
+    else:
+        _status_emoji_by_message.pop(message.id, None)
 
 
 def _history_before_for_follow_up(
