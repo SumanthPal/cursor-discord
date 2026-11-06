@@ -864,6 +864,9 @@ class AgentCog(commands.Cog):
             return
         if self.bot.user is None:
             return
+        _alias_role_mentions_to_bot(
+            message, self.bot.user, self.bot.settings.cursor_role_name
+        )
 
         # Plain reply naming a repo after we asked "which repo?"
         if await self._maybe_consume_repo_reply(message):
@@ -1921,6 +1924,30 @@ def _history_before_for_follow_up(
     if coalesce_count > 1 and isinstance(coalesce_anchor, discord.Message):
         return coalesce_anchor
     return anchor
+
+
+def _alias_role_mentions_to_bot(
+    message: discord.Message, bot_user: discord.ClientUser, role_name: str
+) -> None:
+    """Treat @-mentions of the access role or the bot's own role as @-mentions of the bot.
+
+    Discord autocompletes `@Cursor` to the access role when it shares the bot's name.
+    """
+    guild = message.guild
+    if guild is None or not message.role_mentions:
+        return
+    self_role = guild.self_role
+    hit = False
+    content = message.content
+    for role in message.role_mentions:
+        if role.name == role_name or (self_role is not None and role.id == self_role.id):
+            content = content.replace(f"<@&{role.id}>", f"<@{bot_user.id}>")
+            hit = True
+    if not hit:
+        return
+    message.content = content
+    if bot_user not in message.mentions:
+        message.mentions.append(bot_user)
 
 
 def _strip_mention(content: str, bot_user: discord.ClientUser) -> str:
