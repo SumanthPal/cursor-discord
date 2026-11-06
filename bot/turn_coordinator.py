@@ -60,6 +60,7 @@ class TurnCoordinator:
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._pending: dict[str, _CoalesceSlot | None] = {}
         self._system_pending: dict[str, deque[FollowUpJob]] = defaultdict(deque)
+        self._system_turn_active: set[str] = set()
         self._steer_batches: dict[str, _SteerBatch] = {}
         self._steer_tasks: dict[str, asyncio.Task[None]] = {}
         self._last_queue_ack: dict[tuple[str, int], float] = {}
@@ -193,7 +194,11 @@ class TurnCoordinator:
             active = self._is_run_active is not None and self._is_run_active(
                 agent_id
             )
-            if active and self._steer is not None:
+            if (
+                active
+                and self._steer is not None
+                and agent_id not in self._system_turn_active
+            ):
                 await self._schedule_steer(job)
                 return
             await self._coalesce_while_busy(job, ack=ack)
@@ -278,26 +283,33 @@ class TurnCoordinator:
         async with lock:
             job: FollowUpJob | None = first
             while job is not None:
-                try:
-                    await start(job)
-                    self._busy_retries[agent_id] = 0
-                except AgentBusyError:
-                    retries = self._busy_retries[agent_id] + 1
-                    self._busy_retries[agent_id] = retries
-                    if retries > 30:
-                        logger.error(
-                            "giving up on follow-up for %s after agent_busy retries",
-                            agent_id,
-                        )
+                if job.system_turn:
+                    self._system_turn_active.add(agent_id)
+                finished = False
+                while not finished:
+                    try:
+                        await start(job)
                         self._busy_retries[agent_id] = 0
-                    else:
-                        logger.info(
-                            "agent busy for %s — retry %s/30",
-                            agent_id,
-                            retries,
-                        )
-                        await asyncio.sleep(2.0)
-                        continue
+                        finished = True
+                    except AgentBusyError:
+                        retries = self._busy_retries[agent_id] + 1
+                        self._busy_retries[agent_id] = retries
+                        if retries > 30:
+                            logger.error(
+                                "giving up on follow-up for %s after agent_busy retries",
+                                agent_id,
+                            )
+                            self._busy_retries[agent_id] = 0
+                            finished = True
+                        else:
+                            logger.info(
+                                "agent busy for %s — retry %s/30",
+                                agent_id,
+                                retries,
+                            )
+                            await asyncio.sleep(2.0)
+                if job.system_turn:
+                    self._system_turn_active.discard(agent_id)
                 slot = self._pending.pop(agent_id, None)
                 if slot is None:
                     job = None

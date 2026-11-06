@@ -53,9 +53,8 @@ class CursorDiscordBot(commands.Bot):
         self.thread_agents: dict[int, AgentRef] = {}
         # bc- id → PR URL already enrolled in pub/sub watch follow-up
         self.pr_watch_enrolled: dict[str, str] = {}
-        # Agents (and threads before bc- exists) that opted out of PR watch
+        # bc- ids that opted out of automatic PR watch
         self.pr_watch_opt_out: set[str] = set()
-        self.pr_watch_opt_out_threads: set[int] = set()
         self.turns = turns or TurnCoordinator()
         self._http_runner: web.AppRunner | None = None
 

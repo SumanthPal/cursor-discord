@@ -1478,24 +1478,12 @@ class AgentCog(commands.Cog):
     def _note_pr_watch_opt_out(
         self,
         *,
-        thread: discord.Thread | discord.DMChannel,
         agent_prompt: AgentPrompt,
-        agent_id: str | None = None,
+        agent_id: str | None,
     ) -> None:
         if not user_opted_out_of_pr_watch(agent_prompt.text):
             return
         if agent_id and is_agent_id(agent_id):
-            self.bot.pr_watch_opt_out.add(agent_id)
-        else:
-            self.bot.pr_watch_opt_out_threads.add(thread.id)
-
-    def _apply_pending_pr_watch_opt_out(
-        self, thread: discord.Thread | discord.DMChannel, agent_id: str
-    ) -> None:
-        if thread.id not in self.bot.pr_watch_opt_out_threads:
-            return
-        self.bot.pr_watch_opt_out_threads.discard(thread.id)
-        if is_agent_id(agent_id):
             self.bot.pr_watch_opt_out.add(agent_id)
 
     async def _run_create(
@@ -1508,9 +1496,6 @@ class AgentCog(commands.Cog):
         auto_create_pr: bool = True,
         discord_user: discord.User | discord.Member | None = None,
     ) -> None:
-        self._note_pr_watch_opt_out(
-            thread=thread, agent_prompt=agent_prompt, agent_id=None
-        )
         editor = ChatStatusEditor(status_message)
         card = launch_embed(
             repo=project.repo,
@@ -1572,6 +1557,9 @@ class AgentCog(commands.Cog):
             )
             embed = card if state in {"created", "starting"} else None
             if is_agent_id(agent_id):
+                self._note_pr_watch_opt_out(
+                    agent_prompt=agent_prompt, agent_id=agent_id
+                )
                 self._bind_thread_agent(
                     thread,
                     agent_id=agent_id,
@@ -1639,6 +1627,9 @@ class AgentCog(commands.Cog):
             repo=project.repo,
             project=project.alias,
         )
+        self._note_pr_watch_opt_out(
+            agent_prompt=agent_prompt, agent_id=outcome.agent_id
+        )
         await self._deliver_artifacts(thread, outcome.agent_id)
         await self._maybe_enqueue_pr_watch(
             thread=thread,
@@ -1667,7 +1658,7 @@ class AgentCog(commands.Cog):
             return
         if user_opted_out_of_pr_watch(source_prompt.text):
             self._note_pr_watch_opt_out(
-                thread=thread, agent_prompt=source_prompt, agent_id=agent_id
+                agent_prompt=source_prompt, agent_id=agent_id
             )
             return
         if agent_id in self.bot.pr_watch_opt_out:
@@ -1718,7 +1709,6 @@ class AgentCog(commands.Cog):
     ) -> None:
         if not is_agent_id(agent_id):
             return
-        self._apply_pending_pr_watch_opt_out(thread, agent_id)
         prev = self.bot.thread_agents.get(thread.id)
         self.bot.thread_agents[thread.id] = AgentRef(
             agent_id=agent_id,
@@ -1892,9 +1882,7 @@ class AgentCog(commands.Cog):
         coalesce_anchor: object | None = None,
     ) -> None:
         thread = status_message.channel
-        self._note_pr_watch_opt_out(
-            thread=thread, agent_prompt=agent_prompt, agent_id=agent_id
-        )
+        self._note_pr_watch_opt_out(agent_prompt=agent_prompt, agent_id=agent_id)
         editor = ChatStatusEditor(status_message)
         assert self.bot.user is not None
         if isinstance(thread, discord.Thread):
