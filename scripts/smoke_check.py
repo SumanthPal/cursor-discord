@@ -218,6 +218,7 @@ def test_policy() -> None:
         id = 2
 
     assert policy.authorize(user=BadU(), guild=G(), consume_rate=False) is not None
+    assert policy.authorize(user=U(), guild=None, consume_rate=False) is None
     assert not policy.is_admin(U())
 
     class Role:

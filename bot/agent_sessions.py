@@ -24,7 +24,7 @@ def repo_preference_channel_id(channel_id: int, *, parent_id: int | None) -> int
 class SessionRegistry:
     def __init__(self) -> None:
         self._by_id: dict[str, AgentSession] = {}
-        self._recent_repo: dict[int, str] = {}
+        self._recent_repo: dict[tuple[int, int], str] = {}
 
     def remember(
         self,
@@ -44,10 +44,10 @@ class SessionRegistry:
             repo=repo,
             prompt_summary=prompt_summary,
         )
-        self._recent_repo[pref] = repo
+        self._recent_repo[(pref, discord_user_id)] = repo
 
-    def recent_repo(self, channel_id: int) -> str | None:
-        return self._recent_repo.get(channel_id)
+    def recent_repo(self, channel_id: int, user_id: int) -> str | None:
+        return self._recent_repo.get((channel_id, user_id))
 
     def get(self, agent_id: str) -> AgentSession | None:
         return self._by_id.get(agent_id)

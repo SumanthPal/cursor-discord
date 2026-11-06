@@ -782,9 +782,13 @@ class AgentCog(commands.Cog):
                 )
                 return True
             if parsed.kind == MentionKind.FORCE_AGENT:
-                prompt_text = parsed.prompt
+                return False
             elif parsed.kind == MentionKind.PROMPT:
-                prompt_text = parsed.prompt
+                prompt_text = (
+                    _strip_mention(message.content, self.bot.user)
+                    if mentioned
+                    else message.content.strip()
+                )
             elif _is_bot_mention_only(message, self.bot.user):
                 await self._reply_help(message)
                 return True
@@ -936,9 +940,9 @@ class AgentCog(commands.Cog):
                     if denied:
                         await message.reply(denied, mention_author=False)
                         return
-                    body = parsed.prompt if parsed.kind == MentionKind.PROMPT else ""
+                    follow_text = _strip_mention(message.content, self.bot.user)
                     agent_prompt = await agent_prompt_from_message(
-                        message, text=body
+                        message, text=follow_text
                     )
                     if not agent_prompt.has_content:
                         if agent_prompt.feedback:
@@ -958,8 +962,10 @@ class AgentCog(commands.Cog):
 
         if isinstance(message.channel, discord.DMChannel):
             if ref and self.bot.user in message.mentions:
-                return
-            if ref:
+                tail = _strip_mention(message.content, self.bot.user)
+                if parse_mention(tail).kind != MentionKind.FORCE_AGENT:
+                    return
+            elif ref:
                 return
             await message.reply(
                 "Start a cloud agent from a server channel with `@Cursor …`. "
@@ -1117,12 +1123,12 @@ class AgentCog(commands.Cog):
         return repo_preference_channel_id(cid, parent_id=parent_id)
 
     async def _recent_repo_for_channel(
-        self, channel: discord.abc.Messageable | None
+        self, channel: discord.abc.Messageable | None, user_id: int
     ) -> str | None:
         pref = self._repo_preference_channel_id(channel)
         if pref is None:
             return None
-        return self.bot.sessions.recent_repo(pref)
+        return self.bot.sessions.recent_repo(pref, user_id)
 
     async def _plan_launch(
         self,
@@ -1166,7 +1172,7 @@ class AgentCog(commands.Cog):
         if len(bound) == 1:
             return bound[0]
         if bound:
-            recent = await self._recent_repo_for_channel(channel)
+            recent = await self._recent_repo_for_channel(channel, user.id)
             if recent:
                 matched = match_allowed_repo(recent, [p.repo for p in bound])
                 if matched:
@@ -1366,7 +1372,9 @@ class AgentCog(commands.Cog):
         auto_create_pr: bool = True,
     ) -> None:
         channel = message.channel
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        if not isinstance(
+            channel, (discord.TextChannel, discord.Thread, discord.DMChannel)
+        ):
             await message.reply("Need a text channel.", mention_author=False)
             return
         thread, status_message = await self._open_agent_thread(
@@ -1387,13 +1395,22 @@ class AgentCog(commands.Cog):
     async def _open_agent_thread(
         self,
         *,
-        channel: discord.TextChannel | discord.Thread,
+        channel: discord.TextChannel | discord.Thread | discord.DMChannel,
         prompt: str,
         repo: str | None,
         thread_anchor: discord.Message | None = None,
         interaction_user: discord.User | discord.Member | None = None,
-    ) -> tuple[discord.Thread, discord.Message]:
+    ) -> tuple[discord.Thread | discord.DMChannel, discord.Message]:
         """Branch a public thread from the anchor message; first bot reply lives inside the thread."""
+        if isinstance(channel, discord.DMChannel):
+            anchor = thread_anchor or await channel.send(
+                clip_discord(f"**{interaction_user.display_name if interaction_user else 'You'}:** {prompt}")
+            )
+            status_message = await anchor.reply(
+                chat_ack(prompt=prompt, repo=repo, echo_prompt=False),
+                mention_author=False,
+            )
+            return channel, status_message
         if isinstance(channel, discord.Thread):
             if interaction_user is not None:
                 await channel.send(
@@ -1448,7 +1465,7 @@ class AgentCog(commands.Cog):
         self,
         *,
         status_message: discord.Message,
-        thread: discord.Thread,
+        thread: discord.Thread | discord.DMChannel,
         agent_prompt: AgentPrompt,
         project: Project,
         auto_create_pr: bool = True,
@@ -1478,16 +1495,24 @@ class AgentCog(commands.Cog):
         async def on_status(state: str, data: dict) -> None:
             agent_id = data.get("agent_id") or "pending"
             if agent_id != "pending" and user is not None:
-                parent_id = thread.parent_id if isinstance(thread.parent_id, int) else None
+                parent_id = (
+                    thread.parent_id
+                    if isinstance(thread, discord.Thread)
+                    and isinstance(thread.parent_id, int)
+                    else None
+                )
+                pref_channel = (
+                    repo_preference_channel_id(thread.id, parent_id=parent_id)
+                    if isinstance(thread, discord.Thread)
+                    else thread.id
+                )
                 self.bot.sessions.remember(
                     agent_id=agent_id,
                     discord_user_id=user.id,
                     channel_id=thread.id,
                     repo=project.repo,
                     prompt_summary=_truncate_prompt(agent_prompt.display),
-                    repo_preference_channel_id=repo_preference_channel_id(
-                        thread.id, parent_id=parent_id
-                    ),
+                    repo_preference_channel_id=pref_channel,
                 )
                 self.bot.sessions.set_status(agent_id, state)
             summary = data.get("snippet") or data.get("result")
@@ -1681,6 +1706,8 @@ class AgentCog(commands.Cog):
             repo=job.repo,
             project_alias=job.project_alias,
             anchor_message=anchor if isinstance(anchor, discord.Message) else None,
+            coalesce_count=job.coalesce_count,
+            coalesce_anchor=job.coalesce_anchor,
         )
         await self.bot.turns.flush_pending_turn(job.agent_id)
 
@@ -1695,7 +1722,11 @@ class AgentCog(commands.Cog):
             channel = anchor.channel
         elif isinstance(job.status_message, discord.Message):
             channel = job.status_message.channel
-        before = anchor if isinstance(anchor, discord.Message) else None
+        before = _history_before_for_follow_up(
+            coalesce_count=job.coalesce_count,
+            coalesce_anchor=job.coalesce_anchor,
+            anchor=anchor if isinstance(anchor, discord.Message) else None,
+        )
         if channel is not None:
             augmented = await augment_prompt_with_thread(
                 job.agent_prompt,
@@ -1709,9 +1740,7 @@ class AgentCog(commands.Cog):
             agent_id=job.agent_id,
             prompt=augmented.sdk_message(),
         )
-        if outcome.delivery == "queued":
-            self.bot.turns.enqueue_pending(job)
-        elif outcome.delivery in {"unavailable", "error"}:
+        if outcome.delivery in {"unavailable", "error"}:
             self.bot.turns.enqueue_pending(job)
             if anchor is not None and self.bot.turns.should_ack_queue(
                 job.agent_id, anchor.channel.id
@@ -1749,6 +1778,8 @@ class AgentCog(commands.Cog):
         repo: str,
         project_alias: str | None,
         anchor_message: discord.Message | None = None,
+        coalesce_count: int = 1,
+        coalesce_anchor: object | None = None,
     ) -> None:
         editor = ChatStatusEditor(status_message)
         assert self.bot.user is not None
@@ -1760,10 +1791,15 @@ class AgentCog(commands.Cog):
                 repo=repo if repo != "(existing agent)" else None,
                 project=project_alias,
             )
+        history_before = _history_before_for_follow_up(
+            coalesce_count=coalesce_count,
+            coalesce_anchor=coalesce_anchor,
+            anchor=anchor_message,
+        )
         augmented = await augment_prompt_with_thread(
             agent_prompt,
             channel=status_message.channel,
-            before_message=anchor_message or status_message,
+            before_message=history_before or status_message,
             bot_user_id=self.bot.user.id,
         )
 
@@ -1863,6 +1899,18 @@ async def _set_status_reaction(message: discord.Message, status: str) -> None:
         message._cursor_status_emoji = emoji  # type: ignore[attr-defined]
     except discord.HTTPException:
         pass
+
+
+def _history_before_for_follow_up(
+    *,
+    coalesce_count: int,
+    coalesce_anchor: object | None,
+    anchor: discord.Message | None,
+) -> discord.Message | None:
+    """When bursts are merged, omit those messages from thread context."""
+    if coalesce_count > 1 and isinstance(coalesce_anchor, discord.Message):
+        return coalesce_anchor
+    return anchor
 
 
 def _strip_mention(content: str, bot_user: discord.ClientUser) -> str:

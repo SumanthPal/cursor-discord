@@ -18,7 +18,8 @@ class Policy:
         if not allowed:
             return None
         if guild is None:
-            return "This bot only runs inside allowlisted servers."
+            # DMs are authorized via check_user (not tied to a guild).
+            return None
         if guild.id not in allowed:
             return "This server is not allowlisted for the Cursor bot."
         return None

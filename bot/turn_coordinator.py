@@ -34,18 +34,21 @@ class FollowUpJob:
     user_message: object | None = None  # discord.Message
     status_message: object | None = None  # discord.Message — /talk pre-posts status
     coalesce_count: int = 1
+    coalesce_anchor: object | None = None  # first discord.Message in a burst
 
 
 @dataclass
 class _CoalesceSlot:
     job: FollowUpJob
     prompts: list[AgentPrompt]
+    first_message: object | None = None
 
 
 @dataclass
 class _SteerBatch:
     job: FollowUpJob
     prompts: list[AgentPrompt] = field(default_factory=list)
+    first_message: object | None = None
 
 
 class TurnCoordinator:
@@ -108,6 +111,7 @@ class TurnCoordinator:
         job = slot.job
         job.agent_prompt = merge_agent_prompts(slot.prompts)
         job.coalesce_count = len(slot.prompts)
+        job.coalesce_anchor = slot.first_message
         await self._drain(agent_id, job, start=self._start, ack=self._ack)
 
     def clear_pending(self, agent_id: str) -> None:
@@ -123,7 +127,9 @@ class TurnCoordinator:
         slot = self._pending.get(agent_id)
         if slot is None:
             self._pending[agent_id] = _CoalesceSlot(
-                job=job, prompts=[job.agent_prompt]
+                job=job,
+                prompts=[job.agent_prompt],
+                first_message=job.user_message,
             )
         else:
             slot.prompts.append(job.agent_prompt)
@@ -175,7 +181,11 @@ class TurnCoordinator:
         agent_id = job.agent_id
         batch = self._steer_batches.get(agent_id)
         if batch is None:
-            batch = _SteerBatch(job=job, prompts=[job.agent_prompt])
+            batch = _SteerBatch(
+                job=job,
+                prompts=[job.agent_prompt],
+                first_message=job.user_message,
+            )
             self._steer_batches[agent_id] = batch
         else:
             batch.prompts.append(job.agent_prompt)
@@ -203,6 +213,7 @@ class TurnCoordinator:
         out = batch.job
         out.agent_prompt = merged
         out.coalesce_count = len(batch.prompts)
+        out.coalesce_anchor = batch.first_message
         try:
             await self._steer(out)
         except Exception:  # noqa: BLE001
@@ -219,7 +230,9 @@ class TurnCoordinator:
         slot = self._pending.get(agent_id)
         if slot is None:
             self._pending[agent_id] = _CoalesceSlot(
-                job=job, prompts=[job.agent_prompt]
+                job=job,
+                prompts=[job.agent_prompt],
+                first_message=job.user_message,
             )
             await ack(job, 1)
             return
@@ -269,6 +282,7 @@ class TurnCoordinator:
                     job = slot.job
                     job.agent_prompt = merge_agent_prompts(slot.prompts)
                     job.coalesce_count = len(slot.prompts)
+                    job.coalesce_anchor = slot.first_message
         await self._flush_pending(agent_id)
 
     def should_ack_queue(self, agent_id: str, channel_id: int) -> bool:
