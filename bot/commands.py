@@ -61,6 +61,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+AGENTS_DASHBOARD_URL = "https://cursor.com/agents"
+
 HELP_TEXT = """**Cursor** — cloud agents in Discord (Slack-style)
 • `@Cursor …` — start or follow up in the agent thread (`repo=`, `branch=`, `model=`, `autopr=false`)
 • `@Cursor agent …` — force a **new** agent in this thread
@@ -137,7 +139,7 @@ class AgentCog(commands.Cog):
         await interaction.response.send_message(
             HELP_TEXT.format(
                 role=self.bot.settings.cursor_role_name,
-                dashboard=agent_dashboard_url("bc-…"),
+                dashboard=AGENTS_DASHBOARD_URL,
             ),
             ephemeral=True,
         )
@@ -673,7 +675,7 @@ class AgentCog(commands.Cog):
     async def _reply_help(self, message: discord.Message) -> None:
         text = HELP_TEXT.format(
             role=self.bot.settings.cursor_role_name,
-            dashboard="https://cursor.com/agents",
+            dashboard=AGENTS_DASHBOARD_URL,
         )
         await message.reply(clip_discord(text), mention_author=False)
 
