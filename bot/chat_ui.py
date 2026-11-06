@@ -53,9 +53,6 @@ def chat_status_body(
             base = chat_progress(snippet.strip())
         else:
             base = chat_working(repo=repo)
-        trailer = ref_spoiler(agent_id, run_id) if agent_id not in {"", "pending"} else ""
-        if trailer:
-            return clip_discord(f"{base}\n{trailer}")
         return clip_discord(base)
 
     text = chat_done(

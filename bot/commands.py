@@ -13,7 +13,6 @@ from bot.agent_ref import (
     chat_failed,
     find_agent_ref_in_channel,
     is_agent_id,
-    ref_spoiler,
 )
 from bot.channel_bind import (
     pin_channel_repo,
@@ -1167,8 +1166,6 @@ class AgentCog(commands.Cog):
         channel = interaction.channel
         status_msg = await interaction.followup.send(
             chat_ack(prompt=agent_prompt.display, repo=repo)
-            + "\n"
-            + ref_spoiler(agent_id)
         )
         job = FollowUpJob(
             agent_id=agent_id,
@@ -1213,9 +1210,7 @@ class AgentCog(commands.Cog):
             if not isinstance(message, discord.Message):
                 raise TypeError("queued follow-up needs user_message or status_message")
             status_msg = await message.reply(
-                chat_ack(prompt=job.agent_prompt.display, repo=job.repo)
-                + "\n"
-                + ref_spoiler(job.agent_id),
+                chat_ack(prompt=job.agent_prompt.display, repo=job.repo),
                 mention_author=False,
             )
             job.status_message = status_msg

@@ -291,6 +291,16 @@ def test_chat_status_trailer() -> None:
     from bot.chat_ui import chat_status_body
 
     agent_id = "bc-00000000-0000-0000-0000-000000000001"
+    working = chat_status_body(
+        agent_id=agent_id,
+        status="running",
+        repo="https://github.com/acme/app",
+        run_id="run-1",
+    )
+    assert agent_id not in working
+    assert "run-1" not in working
+    assert "working" in working
+
     body = chat_status_body(
         agent_id=agent_id,
         status="finished",
