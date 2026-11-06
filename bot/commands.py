@@ -1475,6 +1475,29 @@ class AgentCog(commands.Cog):
                 name=name, message=anchor, type=discord.ChannelType.public_thread
             )
 
+    def _note_pr_watch_opt_out(
+        self,
+        *,
+        thread: discord.Thread | discord.DMChannel,
+        agent_prompt: AgentPrompt,
+        agent_id: str | None = None,
+    ) -> None:
+        if not user_opted_out_of_pr_watch(agent_prompt.text):
+            return
+        if agent_id and is_agent_id(agent_id):
+            self.bot.pr_watch_opt_out.add(agent_id)
+        else:
+            self.bot.pr_watch_opt_out_threads.add(thread.id)
+
+    def _apply_pending_pr_watch_opt_out(
+        self, thread: discord.Thread | discord.DMChannel, agent_id: str
+    ) -> None:
+        if thread.id not in self.bot.pr_watch_opt_out_threads:
+            return
+        self.bot.pr_watch_opt_out_threads.discard(thread.id)
+        if is_agent_id(agent_id):
+            self.bot.pr_watch_opt_out.add(agent_id)
+
     async def _run_create(
         self,
         *,
@@ -1485,6 +1508,9 @@ class AgentCog(commands.Cog):
         auto_create_pr: bool = True,
         discord_user: discord.User | discord.Member | None = None,
     ) -> None:
+        self._note_pr_watch_opt_out(
+            thread=thread, agent_prompt=agent_prompt, agent_id=None
+        )
         editor = ChatStatusEditor(status_message)
         card = launch_embed(
             repo=project.repo,
@@ -1640,13 +1666,17 @@ class AgentCog(commands.Cog):
         if is_pr_watch_prompt(source_prompt.text):
             return
         if user_opted_out_of_pr_watch(source_prompt.text):
+            self._note_pr_watch_opt_out(
+                thread=thread, agent_prompt=source_prompt, agent_id=agent_id
+            )
+            return
+        if agent_id in self.bot.pr_watch_opt_out:
             return
         status_key = (outcome.status or "").lower()
         if status_key in {"error", "cancelled", "canceled"}:
             return
         if self.bot.pr_watch_enrolled.get(agent_id) == outcome.pr_url:
             return
-        self.bot.pr_watch_enrolled[agent_id] = outcome.pr_url
 
         try:
             status_msg = await thread.send(
@@ -1664,12 +1694,18 @@ class AgentCog(commands.Cog):
             repo=repo,
             project_alias=project_alias,
             status_message=status_msg,
+            system_turn=True,
         )
-        await self.bot.turns.submit_follow_up(
-            job,
-            start=self._start_queued_follow_up,
-            ack=self._ack_queued_follow_up,
-        )
+        try:
+            await self.bot.turns.submit_follow_up(
+                job,
+                start=self._start_queued_follow_up,
+                ack=self._ack_queued_follow_up,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to queue PR watch follow-up for %s", agent_id)
+            return
+        self.bot.pr_watch_enrolled[agent_id] = outcome.pr_url
 
     def _bind_thread_agent(
         self,
@@ -1682,6 +1718,7 @@ class AgentCog(commands.Cog):
     ) -> None:
         if not is_agent_id(agent_id):
             return
+        self._apply_pending_pr_watch_opt_out(thread, agent_id)
         prev = self.bot.thread_agents.get(thread.id)
         self.bot.thread_agents[thread.id] = AgentRef(
             agent_id=agent_id,
@@ -1792,20 +1829,23 @@ class AgentCog(commands.Cog):
             channel = anchor.channel
         elif isinstance(job.status_message, discord.Message):
             channel = job.status_message.channel
-        before = _history_before_for_follow_up(
-            coalesce_count=job.coalesce_count,
-            coalesce_anchor=job.coalesce_anchor,
-            anchor=anchor if isinstance(anchor, discord.Message) else None,
-        )
-        if channel is not None:
-            augmented = await augment_prompt_with_thread(
-                job.agent_prompt,
-                channel=channel,
-                before_message=before,
-                bot_user_id=self.bot.user.id,
-            )
-        else:
+        if is_pr_watch_prompt(job.agent_prompt.text):
             augmented = job.agent_prompt
+        else:
+            before = _history_before_for_follow_up(
+                coalesce_count=job.coalesce_count,
+                coalesce_anchor=job.coalesce_anchor,
+                anchor=anchor if isinstance(anchor, discord.Message) else None,
+            )
+            if channel is not None:
+                augmented = await augment_prompt_with_thread(
+                    job.agent_prompt,
+                    channel=channel,
+                    before_message=before,
+                    bot_user_id=self.bot.user.id,
+                )
+            else:
+                augmented = job.agent_prompt
         outcome = await self.bot.cursor.steer(
             agent_id=job.agent_id,
             prompt=augmented.sdk_message(),
@@ -1851,9 +1891,12 @@ class AgentCog(commands.Cog):
         coalesce_count: int = 1,
         coalesce_anchor: object | None = None,
     ) -> None:
+        thread = status_message.channel
+        self._note_pr_watch_opt_out(
+            thread=thread, agent_prompt=agent_prompt, agent_id=agent_id
+        )
         editor = ChatStatusEditor(status_message)
         assert self.bot.user is not None
-        thread = status_message.channel
         if isinstance(thread, discord.Thread):
             self._bind_thread_agent(
                 thread,

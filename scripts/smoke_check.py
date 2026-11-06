@@ -339,12 +339,23 @@ def test_chat_status_trailer() -> None:
 
 
 def test_follow_up_queue() -> None:
+    from bot.multimodal import AgentPrompt
+    from bot.turn_coordinator import FollowUpJob
+
     assert is_agent_busy_error(
         Exception("failed_precondition: [agent_busy] Agent already has an active run")
     )
     assert not is_agent_busy_error(Exception("network timeout"))
     assert "turn" in coalesce_ack(merged_count=1).lower()
     assert "3" in coalesce_ack(merged_count=3)
+    job = FollowUpJob(
+        agent_id="bc-test",
+        agent_prompt=AgentPrompt.from_text("x"),
+        repo="https://github.com/a/b",
+        project_alias=None,
+        system_turn=True,
+    )
+    assert job.system_turn is True
     print("ok follow_up_queue")
 
 

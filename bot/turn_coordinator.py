@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, TypeVar
 
@@ -35,6 +35,8 @@ class FollowUpJob:
     status_message: object | None = None  # discord.Message — /talk pre-posts status
     coalesce_count: int = 1
     coalesce_anchor: object | None = None  # first discord.Message in a burst
+    # Bot-initiated turns (PR pub/sub enroll) must not steer/coalesce with user chat.
+    system_turn: bool = False
 
 
 @dataclass
@@ -57,6 +59,7 @@ class TurnCoordinator:
     def __init__(self) -> None:
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._pending: dict[str, _CoalesceSlot | None] = {}
+        self._system_pending: dict[str, deque[FollowUpJob]] = defaultdict(deque)
         self._steer_batches: dict[str, _SteerBatch] = {}
         self._steer_tasks: dict[str, asyncio.Task[None]] = {}
         self._last_queue_ack: dict[tuple[str, int], float] = {}
@@ -102,6 +105,13 @@ class TurnCoordinator:
         """Start coalesced follow-ups after a create/run releases the turn lock."""
         if self._start is None or self._ack is None:
             return
+        if self._locks[agent_id].locked():
+            return
+        system_q = self._system_pending.get(agent_id)
+        if system_q:
+            job = system_q.popleft()
+            await self._drain(agent_id, job, start=self._start, ack=self._ack)
+            return
         slot = self._pending.pop(agent_id, None)
         if slot is None:
             return
@@ -116,6 +126,7 @@ class TurnCoordinator:
 
     def clear_pending(self, agent_id: str) -> None:
         self._pending.pop(agent_id, None)
+        self._system_pending.pop(agent_id, None)
         self._steer_batches.pop(agent_id, None)
         task = self._steer_tasks.pop(agent_id, None)
         if task is not None and not task.done():
@@ -124,6 +135,10 @@ class TurnCoordinator:
     def enqueue_pending(self, job: FollowUpJob) -> None:
         """Fallback when steer fails — wait for the current turn to finish."""
         agent_id = job.agent_id
+        if job.system_turn:
+            self._system_pending[agent_id].append(job)
+            self._schedule_resume_after_active_run(agent_id)
+            return
         slot = self._pending.get(agent_id)
         if slot is None:
             self._pending[agent_id] = _CoalesceSlot(
@@ -165,6 +180,14 @@ class TurnCoordinator:
         ack: Callable[[FollowUpJob, int], Awaitable[None]],
     ) -> None:
         agent_id = job.agent_id
+        if job.system_turn:
+            lock = self._locks[agent_id]
+            if lock.locked():
+                self._system_pending[agent_id].append(job)
+                self._schedule_resume_after_active_run(agent_id)
+                return
+            await self._drain(agent_id, job, start=start, ack=ack)
+            return
         lock = self._locks[agent_id]
         if lock.locked():
             active = self._is_run_active is not None and self._is_run_active(

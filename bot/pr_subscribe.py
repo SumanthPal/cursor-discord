@@ -39,7 +39,8 @@ Do this now:
 
 On every wake from PR subscription notifications:
 - Re-read the PR (comments, reviews, inline review comments — including Bugbot / `cursor[bot]`).
-- Fix valid findings, push when needed, and re-subscribe if subscriptions expired.
+- **Bugbot / review fixes:** address every unresolved inline review comment and review thread you agree with; push to the PR branch; subscribe to head-branch CI if you need the `Cursor Bugbot` check to settle.
+- Re-subscribe to this PR (`subscribe_github_pr`) after each push if subscriptions expired, then end the turn again.
 - Call `cursor-subscriptions-unsubscribe` when the PR merged/closed or the user asked to stop.
 
 Tell Discord in one short line that you subscribed to PR events, then end the turn.{branch_bit}"""
