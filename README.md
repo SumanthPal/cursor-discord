@@ -9,7 +9,7 @@ If several repos are allowed, I ask in chat — reply with `owner/repo` or a Git
 ## Access
 
 - **Admins** = `SUPERUSER_IDS` (env). They run `/setup repos:owner/a,owner/b` to bind a channel (written to the **channel topic** as `cursor-repo:…`, survives deploys). Admins can also pass `/ask repo:`, or type `@Cursor owner/repo …` in an unbound channel (first use pins it).
-- **Members** get access via `/grant @member` (**Cursor** role via `CURSOR_ROLE_NAME`). `/revoke` removes it. Members only work in set-up channels, on that channel's repos: one repo launches directly; several → bot asks, you reply with `owner/repo`.
+- **Members** get access via `/grant @member` (**Cursor Access** role via `CURSOR_ROLE_NAME`). `/revoke` removes it. Members only work in set-up channels, on that channel's repos: one repo launches directly; several → bot asks, you reply with `owner/repo`.
 - Everyone else is denied. If neither `SUPERUSER_IDS` nor `ALLOWED_USER_IDS` is set, everyone is treated as an admin (legacy open mode).
 
 Bot permissions: **Manage Channels** on the work channels (to write topics; the invite bit isn't enough if a channel or category denies it) and **Manage Roles**, with the bot's role above **Cursor**. When it joins a server, the bot posts a setup checklist in the system channel.

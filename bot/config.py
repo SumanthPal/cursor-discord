@@ -64,8 +64,8 @@ def load_settings() -> Settings:
         allowed_user_ids=_csv_ids(os.environ.get("ALLOWED_USER_IDS")),
         allowed_guild_ids=_csv_ids(os.environ.get("ALLOWED_GUILD_IDS")),
         superuser_ids=_csv_ids(os.environ.get("SUPERUSER_IDS")),
-        cursor_role_name=os.environ.get("CURSOR_ROLE_NAME", "Cursor").strip()
-        or "Cursor",
+        cursor_role_name=os.environ.get("CURSOR_ROLE_NAME", "Cursor Access").strip()
+        or "Cursor Access",
         discord_guild_id=discord_guild_id,
         port=int(os.environ.get("PORT", "8080")),
         rate_limit_max=int(os.environ.get("RATE_LIMIT_MAX", "8")),
