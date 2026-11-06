@@ -287,6 +287,20 @@ def test_multimodal_prompt() -> None:
     print("ok multimodal_prompt")
 
 
+def test_thread_agent_ref() -> None:
+    from bot.agent_ref import AgentRef, thread_agent_ref
+
+    agent_id = "bc-00000000-0000-0000-0000-000000000001"
+    mapping = {
+        42: AgentRef(agent_id=agent_id, run_id="run-live", repo="https://github.com/acme/app")
+    }
+    ref = thread_agent_ref(42, mapping)
+    assert ref is not None and ref.agent_id == agent_id and ref.run_id == "run-live"
+    assert thread_agent_ref(99, mapping) is None
+    assert thread_agent_ref(42, None) is None
+    print("ok thread_agent_ref")
+
+
 def test_chat_status_trailer() -> None:
     from bot.chat_ui import chat_status_body
 
@@ -397,6 +411,7 @@ def main() -> None:
     test_policy()
     test_multimodal_prompt()
     test_cloud_artifacts()
+    test_thread_agent_ref()
     test_chat_status_trailer()
     test_follow_up_queue()
     test_chat_repo_reply()

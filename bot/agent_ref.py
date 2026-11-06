@@ -200,6 +200,32 @@ async def find_agent_ref_in_channel(
     return None
 
 
+def thread_agent_ref(
+    thread_id: int | None,
+    thread_agents: dict[int, AgentRef] | None,
+) -> AgentRef | None:
+    if thread_id is None or not thread_agents:
+        return None
+    return thread_agents.get(thread_id)
+
+
+async def resolve_agent_ref_in_channel(
+    channel: discord.abc.Messageable,
+    *,
+    bot_user_id: int,
+    thread_agents: dict[int, AgentRef] | None = None,
+    limit: int = 50,
+) -> AgentRef | None:
+    """Prefer live thread binding (active runs hide ids in message text)."""
+    if isinstance(channel, discord.Thread):
+        cached = thread_agent_ref(channel.id, thread_agents)
+        if cached is not None:
+            return cached
+    return await find_agent_ref_in_channel(
+        channel, bot_user_id=bot_user_id, limit=limit
+    )
+
+
 def _field_value(embed: discord.Embed, name: str) -> str | None:
     for field in embed.fields:
         if field.name == name:
