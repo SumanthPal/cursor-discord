@@ -10,10 +10,10 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.agent_ref import (
+    AgentRef,
     chat_failed,
-    find_agent_ref_in_channel,
     is_agent_id,
-    ref_spoiler,
+    resolve_agent_ref_in_channel,
 )
 from bot.channel_bind import (
     pin_channel_repo,
@@ -279,8 +279,10 @@ class AgentCog(commands.Cog):
         resolved_id = agent_id.strip() if agent_id else None
         if not resolved_id:
             assert self.bot.user is not None
-            ref = await find_agent_ref_in_channel(
-                channel, bot_user_id=self.bot.user.id
+            ref = await resolve_agent_ref_in_channel(
+                channel,
+                bot_user_id=self.bot.user.id,
+                thread_agents=self.bot.thread_agents,
             )
             if not ref:
                 await interaction.followup.send(
@@ -495,8 +497,10 @@ class AgentCog(commands.Cog):
         resolved_id = agent_id.strip() if agent_id else None
         if not resolved_id:
             assert self.bot.user is not None
-            ref = await find_agent_ref_in_channel(
-                interaction.channel, bot_user_id=self.bot.user.id
+            ref = await resolve_agent_ref_in_channel(
+                interaction.channel,
+                bot_user_id=self.bot.user.id,
+                thread_agents=self.bot.thread_agents,
             )
             if not ref:
                 await interaction.followup.send(
@@ -547,8 +551,10 @@ class AgentCog(commands.Cog):
         run_id = None
         if not resolved_id:
             assert self.bot.user is not None
-            ref = await find_agent_ref_in_channel(
-                interaction.channel, bot_user_id=self.bot.user.id
+            ref = await resolve_agent_ref_in_channel(
+                interaction.channel,
+                bot_user_id=self.bot.user.id,
+                thread_agents=self.bot.thread_agents,
             )
             if not ref:
                 await interaction.followup.send(
@@ -659,8 +665,10 @@ class AgentCog(commands.Cog):
                     mention_author=False,
                 )
                 return
-            ref = await find_agent_ref_in_channel(
-                message.channel, bot_user_id=self.bot.user.id
+            ref = await resolve_agent_ref_in_channel(
+                message.channel,
+                bot_user_id=self.bot.user.id,
+                thread_agents=self.bot.thread_agents,
             )
             if ref and not _is_bot_mention_only(message, self.bot.user):
                 prompt_text = message.content.strip()
@@ -1105,6 +1113,14 @@ class AgentCog(commands.Cog):
                 pr_url=data.get("pr_url"),
                 error=str(err) if err else None,
             )
+            if is_agent_id(agent_id):
+                self._bind_thread_agent(
+                    thread,
+                    agent_id=agent_id,
+                    run_id=data.get("run_id"),
+                    repo=project.repo,
+                    project=project.alias,
+                )
             await editor.set_content(
                 body, force=state not in {"running", "streaming"}
             )
@@ -1137,7 +1153,33 @@ class AgentCog(commands.Cog):
             error=outcome.error_message,
         )
         await editor.set_content(final, force=True)
+        self._bind_thread_agent(
+            thread,
+            agent_id=outcome.agent_id,
+            run_id=outcome.run_id,
+            repo=project.repo,
+            project=project.alias,
+        )
         await self._deliver_artifacts(thread, outcome.agent_id)
+
+    def _bind_thread_agent(
+        self,
+        thread: discord.Thread,
+        *,
+        agent_id: str,
+        run_id: str | None = None,
+        repo: str | None = None,
+        project: str | None = None,
+    ) -> None:
+        if not is_agent_id(agent_id):
+            return
+        prev = self.bot.thread_agents.get(thread.id)
+        self.bot.thread_agents[thread.id] = AgentRef(
+            agent_id=agent_id,
+            run_id=run_id if run_id is not None else (prev.run_id if prev else None),
+            repo=repo or (prev.repo if prev else None),
+            project=project or (prev.project if prev else None),
+        )
 
     async def _deliver_artifacts(
         self, thread: discord.abc.Messageable, agent_id: str
@@ -1167,8 +1209,6 @@ class AgentCog(commands.Cog):
         channel = interaction.channel
         status_msg = await interaction.followup.send(
             chat_ack(prompt=agent_prompt.display, repo=repo)
-            + "\n"
-            + ref_spoiler(agent_id)
         )
         job = FollowUpJob(
             agent_id=agent_id,
@@ -1213,9 +1253,7 @@ class AgentCog(commands.Cog):
             if not isinstance(message, discord.Message):
                 raise TypeError("queued follow-up needs user_message or status_message")
             status_msg = await message.reply(
-                chat_ack(prompt=job.agent_prompt.display, repo=job.repo)
-                + "\n"
-                + ref_spoiler(job.agent_id),
+                chat_ack(prompt=job.agent_prompt.display, repo=job.repo),
                 mention_author=False,
             )
             job.status_message = status_msg
@@ -1251,12 +1289,28 @@ class AgentCog(commands.Cog):
         project_alias: str | None,
     ) -> None:
         editor = ChatStatusEditor(status_message)
+        thread = status_message.channel
+        if isinstance(thread, discord.Thread):
+            self._bind_thread_agent(
+                thread,
+                agent_id=agent_id,
+                repo=repo if repo != "(existing agent)" else None,
+                project=project_alias,
+            )
 
         async def on_status(state: str, data: dict) -> None:
             summary = data.get("snippet") or data.get("result") or data.get("error")
             err = data.get("error")
             if err:
                 state = "error"
+            if isinstance(thread, discord.Thread):
+                self._bind_thread_agent(
+                    thread,
+                    agent_id=agent_id,
+                    run_id=data.get("run_id"),
+                    repo=repo if repo != "(existing agent)" else None,
+                    project=project_alias,
+                )
             body = chat_status_body(
                 agent_id=agent_id,
                 status=state,
@@ -1296,10 +1350,15 @@ class AgentCog(commands.Cog):
             error=outcome.error_message,
         )
         await editor.set_content(final, force=True)
-
-        channel = status_message.channel
-        if isinstance(channel, discord.Thread):
-            await self._deliver_artifacts(channel, outcome.agent_id)
+        if isinstance(thread, discord.Thread):
+            self._bind_thread_agent(
+                thread,
+                agent_id=outcome.agent_id,
+                run_id=outcome.run_id,
+                repo=repo if repo != "(existing agent)" else None,
+                project=project_alias,
+            )
+            await self._deliver_artifacts(thread, outcome.agent_id)
 
 
 def _strip_mention(content: str, bot_user: discord.ClientUser) -> str:
