@@ -247,7 +247,10 @@ class AgentCog(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
         name = self.bot.settings.cursor_role_name
-        role = discord.utils.get(guild.roles, name=name)
+        # The bot's own integration role usually shares this name and can't be assigned.
+        role = next(
+            (r for r in guild.roles if r.name == name and not r.managed), None
+        )
         try:
             if grant:
                 if role is None:

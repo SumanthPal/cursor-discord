@@ -34,7 +34,10 @@ class Policy:
 
     def has_grant(self, user: discord.abc.User) -> bool:
         name = self.settings.cursor_role_name
-        return any(r.name == name for r in getattr(user, "roles", ()))
+        return any(
+            r.name == name and not getattr(r, "managed", False)
+            for r in getattr(user, "roles", ())
+        )
 
     def check_user(self, user: discord.abc.User) -> str | None:
         if (
