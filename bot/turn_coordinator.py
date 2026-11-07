@@ -70,6 +70,31 @@ class TurnCoordinator:
         self._is_run_active: Callable[[str], bool] | None = None
         self._busy_retries: dict[str, int] = defaultdict(int)
 
+    def _park_steer_batch_into_pending(
+        self, agent_id: str, batch: _SteerBatch
+    ) -> None:
+        """Append a steer burst to the coalesce slot without collapsing prompt count."""
+        out = batch.job
+        merged = merge_agent_prompts(batch.prompts)
+        out.agent_prompt = merged
+        out.coalesce_count = len(batch.prompts)
+        out.coalesce_anchor = batch.first_message
+        slot = self._pending.get(agent_id)
+        if slot is None:
+            self._pending[agent_id] = _CoalesceSlot(
+                job=out,
+                prompts=list(batch.prompts),
+                first_message=batch.first_message,
+            )
+            return
+        slot.prompts.extend(batch.prompts)
+        out.coalesce_count = len(slot.prompts)
+        out.coalesce_anchor = slot.first_message or batch.first_message
+        out.agent_prompt = merge_agent_prompts(slot.prompts)
+        slot.job = out
+        if slot.first_message is None and batch.first_message is not None:
+            slot.first_message = batch.first_message
+
     def _shelve_pending_steer(self, agent_id: str) -> None:
         """Move debounced steer state into the coalesce queue (PR-watch system turn)."""
         task = self._steer_tasks.pop(agent_id, None)
@@ -78,24 +103,7 @@ class TurnCoordinator:
         batch = self._steer_batches.pop(agent_id, None)
         if batch is None:
             return
-        merged = merge_agent_prompts(batch.prompts)
-        out = batch.job
-        out.agent_prompt = merged
-        out.coalesce_count = len(batch.prompts)
-        out.coalesce_anchor = batch.first_message
-        slot = self._pending.get(agent_id)
-        if slot is None:
-            self._pending[agent_id] = _CoalesceSlot(
-                job=out,
-                prompts=[out.agent_prompt],
-                first_message=batch.first_message,
-            )
-        else:
-            slot.prompts.append(out.agent_prompt)
-            slot.job.agent_prompt = merge_agent_prompts(slot.prompts)
-            slot.job.coalesce_count = len(slot.prompts)
-            if batch.first_message is not None:
-                slot.first_message = batch.first_message
+        self._park_steer_batch_into_pending(agent_id, batch)
 
     def set_follow_up_handlers(
         self,
@@ -265,24 +273,7 @@ class TurnCoordinator:
         if batch is None or self._steer is None:
             return
         if agent_id in self._system_turn_active:
-            merged = merge_agent_prompts(batch.prompts)
-            out = batch.job
-            out.agent_prompt = merged
-            out.coalesce_count = len(batch.prompts)
-            out.coalesce_anchor = batch.first_message
-            slot = self._pending.get(agent_id)
-            if slot is None:
-                self._pending[agent_id] = _CoalesceSlot(
-                    job=out,
-                    prompts=[out.agent_prompt],
-                    first_message=batch.first_message,
-                )
-            else:
-                slot.prompts.append(out.agent_prompt)
-                slot.job.agent_prompt = merge_agent_prompts(slot.prompts)
-                slot.job.coalesce_count = len(slot.prompts)
-                if batch.first_message is not None:
-                    slot.first_message = batch.first_message
+            self._park_steer_batch_into_pending(agent_id, batch)
             return
         merged = merge_agent_prompts(batch.prompts)
         out = batch.job
