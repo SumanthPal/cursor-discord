@@ -68,7 +68,7 @@ HELP_TEXT = """**Cursor** — cloud agents in Discord (Slack-style)
 • `@Cursor agent …` — force a **new** agent in this thread
 • `@Cursor settings` — show channel repo defaults · `@Cursor settings repos:owner/a,owner/b` to pin
 • `@Cursor list my agents` — your recent runs · `@Cursor help` — this message
-• In **DMs**, reply in the thread **without** `@Cursor` · in **channels**, `@Cursor` each follow-up
+• In an **agent thread**, reply **without** `@Cursor` to follow up · in the **channel**, `@Cursor` starts a run
 • While I'm busy, extra messages **redirect the current run** (API steer) · `stop` cancels
 • `/ask` / `/cancel` / `/status` / `/artifacts` also work · PR + demo artifacts when a run finishes
 
@@ -758,10 +758,10 @@ class AgentCog(commands.Cog):
             mention_author=False,
         )
 
-    async def _handle_dm_agent_message(
+    async def _handle_agent_thread_message(
         self, message: discord.Message, ref: AgentRef
     ) -> bool:
-        """DM thread with an existing agent. Returns True if consumed."""
+        """Follow-up in a thread (guild or DM) with an existing agent. Returns True if consumed."""
         if self._get_pending_repo(message.channel.id, message.author.id) is not None:
             return True
 
@@ -813,6 +813,10 @@ class AgentCog(commands.Cog):
             user=message.author, guild=message.guild
         )
         if denied:
+            # Guild threads are often public — ignore plain chatter without access
+            # (same as pre-change behavior when @Cursor was not used).
+            if isinstance(message.channel, discord.Thread) and not mentioned:
+                return False
             await message.reply(denied, mention_author=False)
             return True
 
@@ -902,79 +906,20 @@ class AgentCog(commands.Cog):
             )
             return
 
-        if isinstance(message.channel, discord.DMChannel) and ref:
-            if await self._handle_dm_agent_message(message, ref):
-                return
-
-        # Guild thread follow-ups — require @Cursor (Slack channel thread parity)
-        if isinstance(message.channel, discord.Thread):
-            if self._get_pending_repo(message.channel.id, message.author.id) is not None:
+        if isinstance(message.channel, (discord.Thread, discord.DMChannel)) and ref:
+            if (
+                isinstance(message.channel, discord.Thread)
+                and self._get_pending_repo(message.channel.id, message.author.id)
+                is not None
+            ):
                 await message.reply(
                     "Still waiting — reply with `owner/repo` for that question, "
-                    "or `@Cursor …` for a new request.",
+                    "or `@Cursor …` in the channel for a new request.",
                     mention_author=False,
                 )
                 return
-            ref = await resolve_agent_ref_in_channel(
-                message.channel,
-                bot_user_id=self.bot.user.id,
-                thread_agents=self.bot.thread_agents,
-            )
-            if (
-                ref
-                and self.bot.user in message.mentions
-                and not _is_bot_mention_only(message, self.bot.user)
-            ):
-                prompt_text = _strip_mention(message.content, self.bot.user)
-                parsed = parse_mention(prompt_text)
-                if parsed.kind == MentionKind.FORCE_AGENT:
-                    pass  # fall through to launch handler below
-                elif parsed.kind == MentionKind.STOP:
-                    denied = self.bot.policy.authorize(
-                        user=message.author, guild=message.guild
-                    )
-                    if denied:
-                        await message.reply(denied, mention_author=False)
-                        return
-                    await self._handle_stop_in_thread(
-                        message, agent_id=ref.agent_id, run_id=ref.run_id
-                    )
-                    return
-                elif parsed.kind in {
-                    MentionKind.HELP,
-                    MentionKind.SETTINGS,
-                    MentionKind.LIST_AGENTS,
-                }:
-                    pass  # fall through
-                elif (
-                    (parsed.prompt or message.attachments)
-                    and not message.content.startswith("/")
-                ):
-                    denied = self.bot.policy.authorize(
-                        user=message.author, guild=message.guild
-                    )
-                    if denied:
-                        await message.reply(denied, mention_author=False)
-                        return
-                    follow_text = _strip_mention(message.content, self.bot.user)
-                    agent_prompt = await agent_prompt_from_message(
-                        message, text=follow_text
-                    )
-                    if not agent_prompt.has_content:
-                        if agent_prompt.feedback:
-                            await message.reply(
-                                clip_discord(agent_prompt.feedback),
-                                mention_author=False,
-                            )
-                        return
-                    await self._follow_up_message(
-                        message=message,
-                        agent_id=ref.agent_id,
-                        agent_prompt=agent_prompt,
-                        repo=ref.repo or "(existing agent)",
-                        project_alias=ref.project,
-                    )
-                    return
+            if await self._handle_agent_thread_message(message, ref):
+                return
 
         if isinstance(message.channel, discord.DMChannel):
             if ref and self.bot.user in message.mentions:
