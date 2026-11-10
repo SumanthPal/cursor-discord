@@ -813,6 +813,10 @@ class AgentCog(commands.Cog):
             user=message.author, guild=message.guild
         )
         if denied:
+            # Guild threads are often public — ignore plain chatter without access
+            # (same as pre-change behavior when @Cursor was not used).
+            if isinstance(message.channel, discord.Thread) and not mentioned:
+                return False
             await message.reply(denied, mention_author=False)
             return True
 
