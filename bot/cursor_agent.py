@@ -1,3 +1,4 @@
+"""Cursor cloud agents via cursor-sdk: launch, follow up, steer, cancel, artifacts."""
 from __future__ import annotations
 
 import logging
@@ -7,55 +8,49 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 from cursor_sdk import (
+    AsyncAgent,
     AsyncClient,
     AsyncRun,
     CloudAgentOptions,
     CloudRepository,
     CursorAgentError,
-    RunResult,
     SdkArtifact,
     UserMessage,
 )
 
-from bot.cloud_steer import SteerOutcome, post_steer
-from bot.turn_coordinator import AgentBusyError, is_agent_busy_error
-
-AgentMessage = str | UserMessage
-
 logger = logging.getLogger(__name__)
 
-StatusCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
+AgentMessage = str | UserMessage
+OnActivity = Callable[[str], Awaitable[None]]
+OnStarted = Callable[[str], Awaitable[None]]
+
+# Steering a live run isn't in cursor-sdk yet; it's one Cloud Agents REST call.
+CLOUD_API_BASE = "https://api.cursor.com/v1"
 
 
-@dataclass
-class RunOutcome:
+@dataclass(frozen=True)
+class TurnResult:
     agent_id: str
-    run_id: str
-    status: str
-    result_text: str
+    status: str  # finished | error | cancelled | expired
+    text: str = ""
     pr_url: str | None = None
-    branch: str | None = None
-    error_message: str | None = None
+    error: str | None = None
+
+
+def is_busy_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "agent_busy" in text or "active run" in text
 
 
 class CursorAgentService:
-    """Thin async wrapper around cursor-sdk cloud agents."""
-
-    def __init__(
-        self,
-        *,
-        api_key: str,
-        default_model: str,
-        bridge_workspace: str,
-        turns: object | None = None,
-    ) -> None:
+    def __init__(self, *, api_key: str, model: str, bridge_workspace: str) -> None:
         self.api_key = api_key
-        self.default_model = default_model
+        self.model = model
         self.bridge_workspace = bridge_workspace
         self._client: AsyncClient | None = None
-        self._active_runs: dict[str, AsyncRun] = {}
-        self._turns = turns
+        self._runs: dict[str, AsyncRun] = {}
 
     @property
     def client(self) -> AsyncClient:
@@ -64,366 +59,178 @@ class CursorAgentService:
         return self._client
 
     async def start(self) -> None:
+        # Some SDK paths still read the env var; keep it consistent with settings.
+        os.environ["CURSOR_API_KEY"] = self.api_key
         Path(self.bridge_workspace).mkdir(parents=True, exist_ok=True)
-        # Keep a long-lived bridge for the Discord process lifetime.
         self._client = await AsyncClient.launch_bridge(
-            workspace=self.bridge_workspace,
-            allow_api_key_env_fallback=False,
+            workspace=self.bridge_workspace, allow_api_key_env_fallback=False
         )
-        logger.info("cursor-sdk AsyncClient bridge ready")
+        logger.info("cursor-sdk bridge ready (model=%s)", self.model)
 
     async def close(self) -> None:
-        client = self._client
-        self._client = None
-        self._active_runs.clear()
+        client, self._client = self._client, None
+        self._runs.clear()
         if client is not None:
             await client.aclose()
 
-    async def create_and_run(
+    async def launch(
         self,
-        *,
         prompt: AgentMessage,
+        *,
         repo_url: str,
-        branch: str | None = None,
-        model: str | None = None,
-        auto_create_pr: bool = True,
-        metadata: dict[str, str] | None = None,
-        on_status: StatusCallback | None = None,
-    ) -> RunOutcome:
-        # Omit starting_ref when unset so Cursor resolves the repo default branch
-        # (many repos still use master / develop — hardcoding main fails).
-        starting = (branch or "").strip() or None
+        metadata: dict[str, str],
+        on_started: OnStarted,
+        on_activity: OnActivity,
+    ) -> TurnResult:
         agent = await self.client.create_agent(
-            model=model or self.default_model,
+            model=self.model,
             api_key=self.api_key,
             cloud=CloudAgentOptions(
-                repos=[
-                    CloudRepository(url=repo_url, starting_ref=starting)
-                ],
-                auto_create_pr=auto_create_pr,
+                # No starting_ref: Cursor uses the repo's default branch.
+                repos=[CloudRepository(url=repo_url)],
+                auto_create_pr=True,
                 skip_reviewer_request=True,
-                metadata=metadata or None,
+                metadata=metadata,
             ),
         )
-        agent_id = agent.agent_id
-        if on_status:
-            await on_status("created", {"agent_id": agent_id})
-
-        async def _send_and_run() -> RunOutcome:
-            run = await agent.send(prompt)
-            return await self._drive_run(
-                agent_id=agent_id, run=run, on_status=on_status
-            )
-
-        try:
-            if self._turns is not None:
-                return await self._turns.run_exclusive(agent_id, _send_and_run)  # type: ignore[union-attr]
-            return await _send_and_run()
-        finally:
-            close = getattr(agent, "aclose", None) or getattr(agent, "close", None)
-            if close is not None:
-                result = close()
-                if hasattr(result, "__await__"):
-                    await result  # type: ignore[misc]
-
-    def is_run_active(self, agent_id: str) -> bool:
-        return agent_id in self._active_runs
-
-    async def steer(
-        self,
-        *,
-        agent_id: str,
-        prompt: AgentMessage,
-    ) -> SteerOutcome:
-        return await post_steer(
-            api_key=self.api_key,
-            agent_id=agent_id,
-            message=prompt if isinstance(prompt, (str, UserMessage)) else str(prompt),
-        )
+        await on_started(agent.agent_id)
+        return await self._send(agent, prompt, on_activity)
 
     async def follow_up(
-        self,
-        *,
-        agent_id: str,
-        prompt: AgentMessage,
-        on_status: StatusCallback | None = None,
-    ) -> RunOutcome:
-        agent = await self.client.resume_agent(
-            agent_id,
-            {
-                "api_key": self.api_key,
-                "model": self.default_model,
-            },
+        self, agent_id: str, prompt: AgentMessage, *, on_activity: OnActivity
+    ) -> TurnResult:
+        agent = await self._resume(agent_id)
+        return await self._send(agent, prompt, on_activity)
+
+    def is_running(self, agent_id: str) -> bool:
+        return agent_id in self._runs
+
+    async def steer(self, agent_id: str, prompt: AgentMessage) -> bool:
+        """Redirect the live run. False if the API wouldn't take it (caller should queue)."""
+        payload = {
+            "prompt": {"text": prompt} if isinstance(prompt, str) else prompt.to_json(),
+            "delivery": "steer",
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{CLOUD_API_BASE}/agents/{agent_id}/runs",
+                json=payload,
+                auth=aiohttp.BasicAuth(login=self.api_key, password=""),
+            ) as resp:
+                if resp.status == 202:
+                    return True
+                logger.warning(
+                    "steer agent=%s → %s %s", agent_id, resp.status, (await resp.text())[:300]
+                )
+                return False
+
+    async def cancel(self, agent_id: str) -> bool:
+        """Cancel the agent's running run. False if nothing was running."""
+        run = self._runs.get(agent_id)
+        if run is not None:
+            await run.cancel()
+            return True
+        # Not started by this process (e.g. after a redeploy): ask the API.
+        runs = await self.client.list_runs(
+            agent_id, runtime="cloud", limit=1, api_key=self.api_key
         )
-        try:
-            run = await agent.send(prompt)
-            return await self._drive_run(
-                agent_id=agent_id, run=run, on_status=on_status
-            )
-        finally:
-            close = getattr(agent, "aclose", None) or getattr(agent, "close", None)
-            if close is not None:
-                result = close()
-                if hasattr(result, "__await__"):
-                    await result  # type: ignore[misc]
+        latest = runs.items[0] if runs.items else None
+        if latest is None or latest.status != "running":
+            return False
+        await self.client.cancel_run(latest.id, agent_id=agent_id)
+        return True
 
     async def list_repos(self) -> list[str]:
-        """URLs Cursor can clone for this API key (GitHub-connected account)."""
+        """Repos this API key's GitHub connection can clone."""
         items = await self.client.list_repositories(api_key=self.api_key)
-        urls: list[str] = []
-        for item in items:
-            url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
-            if url:
-                urls.append(str(url).rstrip("/"))
-        # Stable, de-duped
-        return sorted(set(urls))
+        return sorted({str(item.url).rstrip("/") for item in items if item.url})
 
     async def list_artifacts(self, agent_id: str) -> list[SdkArtifact]:
-        agent = await self.client.resume_agent(
-            agent_id,
-            {
-                "api_key": self.api_key,
-                "model": self.default_model,
-            },
-        )
+        agent = await self._resume(agent_id)
         try:
             return await agent.list_artifacts()
         finally:
             await agent.close()
 
     async def download_artifact(self, agent_id: str, path: str) -> bytes:
-        agent = await self.client.resume_agent(
-            agent_id,
-            {
-                "api_key": self.api_key,
-                "model": self.default_model,
-            },
-        )
+        agent = await self._resume(agent_id)
         try:
             return await agent.download_artifact(path)
         finally:
             await agent.close()
 
-    async def status(self, agent_id: str) -> dict[str, Any]:
-        info = await self.client.get_agent(agent_id, api_key=self.api_key)
-        active = self._active_runs.get(agent_id)
-        return {
-            "agent_id": info.agent_id,
-            "name": info.name,
-            "summary": info.summary,
-            "status": info.status,
-            "repos": list(info.repos or []),
-            "archived": info.archived,
-            "active_run_id": getattr(active, "id", None) if active else None,
-        }
+    async def _resume(self, agent_id: str) -> AsyncAgent:
+        return await self.client.resume_agent(
+            agent_id, {"api_key": self.api_key, "model": self.model}
+        )
 
-    async def cancel(self, agent_id: str, run_id: str | None = None) -> str:
-        active = self._active_runs.get(agent_id)
-        if active is not None:
-            if active.supports("cancel"):
-                await active.cancel()
-                return f"Cancelled active run `{getattr(active, 'id', 'unknown')}`."
-            return "Active run does not support cancel."
-
-        target_run_id = run_id
-        if not target_run_id:
-            runs = await self.client.list_runs(
-                agent_id, runtime="cloud", limit=5, api_key=self.api_key
-            )
-            items = getattr(runs, "items", None)
-            if items is None and hasattr(runs, "__aiter__"):
-                items = [item async for item in runs]  # type: ignore[misc]
-            elif items is None and hasattr(runs, "__iter__"):
-                items = list(runs)  # type: ignore[arg-type]
-            else:
-                items = list(items or [])
-            if not items:
-                return "No runs found to cancel."
-            first = items[0]
-            target_run_id = getattr(first, "id", None) or getattr(first, "run_id", None)
-            # Prefer cancelling via run handle when available
-            if hasattr(first, "supports") and first.supports("cancel"):
-                await first.cancel()
-                return f"Cancelled run `{target_run_id}`."
-
-        if not target_run_id:
-            return "Could not resolve a run id to cancel."
-        await self.client.cancel_run(target_run_id, agent_id=agent_id)
-        return f"Cancel requested for run `{target_run_id}`."
-
-    async def _drive_run(
-        self,
-        *,
-        agent_id: str,
-        run: AsyncRun,
-        on_status: StatusCallback | None,
-    ) -> RunOutcome:
-        run_id = getattr(run, "id", None) or "unknown"
-        self._active_runs[agent_id] = run
-        if on_status:
-            await on_status("running", {"agent_id": agent_id, "run_id": run_id})
-
-        last_text = ""
-        last_snippet = ""
+    async def _send(
+        self, agent: AsyncAgent, prompt: AgentMessage, on_activity: OnActivity
+    ) -> TurnResult:
+        agent_id = agent.agent_id
         try:
+            run = await agent.send(prompt)
+            self._runs[agent_id] = run
+            last_line = ""
             async for message in run.stream():
-                text = _assistant_text(message)
-                if text:
-                    last_text = text
-                snippet = _activity_snippet(message)
-                if not snippet or not on_status or snippet == last_snippet:
-                    continue
-                last_snippet = snippet
-                await on_status(
-                    "streaming",
-                    {
-                        "agent_id": agent_id,
-                        "run_id": run_id,
-                        "snippet": snippet[-1900:],
-                    },
-                )
-            result: RunResult = await run.wait()
+                line = activity_line(message)
+                if line and line != last_line:
+                    last_line = line
+                    await on_activity(line)
+            result = await run.wait()
         except CursorAgentError as err:
-            logger.exception("cursor run failed to start: %s", err)
-            if on_status:
-                await on_status(
-                    "error",
-                    {"agent_id": agent_id, "run_id": run_id, "error": str(err)},
-                )
-            return RunOutcome(
-                agent_id=agent_id,
-                run_id=run_id,
-                status="error",
-                result_text="",
-                error_message=str(err),
-            )
+            if is_busy_error(err):
+                raise
+            logger.warning("run failed for %s: %s", agent_id, err)
+            return TurnResult(agent_id=agent_id, status="error", error=str(err))
         finally:
-            self._active_runs.pop(agent_id, None)
+            self._runs.pop(agent_id, None)
+            await agent.close()
 
-        pr_url, branch = _git_bits(result)
-        status = str(getattr(result.status, "value", result.status))
-        text = (result.result or last_text or "").strip()
-        if on_status:
-            await on_status(
-                status,
-                {
-                    "agent_id": agent_id,
-                    "run_id": result.id,
-                    "result": text,
-                    "pr_url": pr_url,
-                    "branch": branch,
-                    "error": result.error_message,
-                },
-            )
-        return RunOutcome(
+        branches = result.git.branches if result.git else ()
+        return TurnResult(
             agent_id=agent_id,
-            run_id=result.id,
-            status=status,
-            result_text=text,
-            pr_url=pr_url,
-            branch=branch,
-            error_message=result.error_message,
+            status=str(getattr(result.status, "value", result.status)),
+            text=(result.result or "").strip(),
+            pr_url=(branches[0].pr_url or None) if branches else None,
+            error=result.error_message,
         )
 
 
-def _activity_snippet(message: Any) -> str:
-    """Human-readable live status from SDK stream messages (tools > tasks > text)."""
-    msg_type = getattr(message, "type", None)
-
-    if msg_type == "tool_call":
-        status = str(getattr(message, "status", "") or "")
-        # Prefer in-flight tools; completed ones flicker too hard for Discord edits.
-        if status == "completed":
-            return ""
-        name = str(getattr(message, "name", "") or "tool").strip() or "tool"
-        detail = _tool_arg_detail(getattr(message, "args", None))
-        label = name.replace("_", " ")
-        return f"`{label}`{detail}"[:300]
-
-    if msg_type == "status":
-        note = str(getattr(message, "message", "") or "").strip()
-        if note:
-            return note[:300]
-        state = str(getattr(message, "status", "") or "").strip()
-        return state[:300] if state else ""
-
-    if msg_type == "task":
-        note = str(getattr(message, "text", "") or "").strip()
-        return note[:300] if note else ""
-
-    if msg_type == "thinking":
+def activity_line(message: Any) -> str:
+    """One short human-readable line for what the agent is doing right now."""
+    kind = getattr(message, "type", None)
+    if kind == "tool_call":
+        if getattr(message, "status", "") == "completed":
+            return ""  # completed tools flicker too fast for Discord edits
+        name = str(getattr(message, "name", "") or "tool").replace("_", " ")
+        return f"{name}{_tool_detail(getattr(message, 'args', None))}"[:200]
+    if kind in {"status", "task"}:
+        note = str(getattr(message, "message", "") or getattr(message, "text", "") or "")
+        return note.strip()[:200]
+    if kind == "thinking":
         return "thinking…"
-
-    text = _assistant_text(message)
-    if not text:
-        return ""
-    # Last non-empty line reads better than a mid-stream blob.
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if not lines:
-        return ""
-    return lines[-1][-300:]
-
-
-def _tool_arg_detail(args: Any) -> str:
-    if not isinstance(args, dict):
-        return ""
-    for key in (
-        "command",
-        "path",
-        "filePath",
-        "file_path",
-        "target_file",
-        "targetFile",
-        "query",
-        "pattern",
-        "url",
-    ):
-        val = args.get(key)
-        if val is None:
-            continue
-        s = " ".join(str(val).split())
-        if not s:
-            continue
-        if len(s) > 64:
-            s = s[:63] + "…"
-        return f" · `{s}`"
+    if kind == "assistant":
+        text = assistant_text(message)
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        return lines[-1][-200:] if lines else ""
     return ""
 
 
-def _assistant_text(message: Any) -> str:
-    msg_type = getattr(message, "type", None)
-    if msg_type != "assistant" and getattr(message, "role", None) != "assistant":
-        # SDKMessage variants
-        name = type(message).__name__
-        if "Assistant" not in name:
-            return ""
-    payload = getattr(message, "message", message)
-    content = getattr(payload, "content", None)
-    if content is None and isinstance(payload, str):
-        return payload
-    chunks: list[str] = []
-    if isinstance(content, list):
-        for block in content:
-            if getattr(block, "type", None) == "text":
-                chunks.append(getattr(block, "text", "") or "")
-            elif isinstance(block, dict) and block.get("type") == "text":
-                chunks.append(str(block.get("text") or ""))
-    elif isinstance(content, str):
-        chunks.append(content)
-    text_attr = getattr(message, "text", None)
-    if text_attr and not chunks:
-        chunks.append(str(text_attr))
-    return "".join(chunks)
+def _tool_detail(args: Any) -> str:
+    if not isinstance(args, dict):
+        return ""
+    for key in ("command", "path", "filePath", "file_path", "target_file", "query", "pattern", "url"):
+        val = " ".join(str(args.get(key) or "").split())
+        if val:
+            return f" `{val[:60] + '…' if len(val) > 60 else val}`"
+    return ""
 
 
-def _git_bits(result: RunResult) -> tuple[str | None, str | None]:
-    git = result.git
-    if not git or not git.branches:
-        return None, None
-    first = git.branches[0]
-    return (first.pr_url or None), (first.branch or None)
-
-
-def ensure_api_key_env(api_key: str) -> None:
-    """Some SDK paths still read CURSOR_API_KEY; keep process env consistent."""
-    os.environ["CURSOR_API_KEY"] = api_key
+def assistant_text(message: Any) -> str:
+    content = getattr(getattr(message, "message", None), "content", None) or ()
+    return "".join(
+        getattr(block, "text", "") or ""
+        for block in content
+        if getattr(block, "type", None) == "text"
+    )

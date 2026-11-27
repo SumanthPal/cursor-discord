@@ -2,20 +2,15 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 
 import discord
 from aiohttp import web
 from discord.ext import commands
 
-from bot.agent_ref import AgentRef
-from bot.agent_sessions import SessionRegistry
 from bot.commands import AgentCog
-from bot.turn_coordinator import TurnCoordinator
 from bot.config import Settings, load_settings
-from bot.cursor_agent import CursorAgentService, ensure_api_key_env
+from bot.cursor_agent import CursorAgentService
 from bot.policy import Policy
-from bot.projects import ProjectRegistry, load_registry
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -25,56 +20,33 @@ logger = logging.getLogger("cursor-discord")
 
 
 class CursorDiscordBot(commands.Bot):
-    def __init__(
-        self,
-        *,
-        settings: Settings,
-        registry: ProjectRegistry,
-        policy: Policy,
-        cursor: CursorAgentService,
-        turns: TurnCoordinator | None = None,
-    ) -> None:
+    def __init__(self, *, settings: Settings, policy: Policy, cursor: CursorAgentService) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guilds = True
-        super().__init__(command_prefix="!", intents=intents)
+        # Conversation only: no prefix or slash commands.
+        super().__init__(command_prefix=commands.when_mentioned, help_command=None, intents=intents)
         self.settings = settings
-        self.registry = registry
         self.policy = policy
         self.cursor = cursor
-        # Short Discord choice values → full repo URLs (autocomplete).
-        self.repo_ref_cache: dict[str, str] = {}
-        # Cloud agent artifact paths already posted to Discord (per bc- id).
-        self.posted_artifacts: dict[str, set[str]] = {}
-        # Waiting for a chat reply with owner/repo (key: channel_id, user_id).
-        self.pending_repo_asks: dict[tuple[int, int], object] = {}
-        self.sessions = SessionRegistry()
-        # Agent thread id → ref while runs are live (message text omits bc- ids).
-        self.thread_agents: dict[int, AgentRef] = {}
-        self.turns = turns or TurnCoordinator()
         self._http_runner: web.AppRunner | None = None
 
     async def setup_hook(self) -> None:
         await self.add_cog(AgentCog(self))
-        ensure_api_key_env(self.settings.cursor_api_key)
         await self.cursor.start()
         await self._start_health_server()
-
+        # Syncing the empty command tree removes slash commands from older versions.
+        await self.tree.sync()
         if self.settings.discord_guild_id:
-            guild = discord.Object(id=self.settings.discord_guild_id)
-            self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-            logger.info(
-                "Synced %s guild commands to %s",
-                len(synced),
-                self.settings.discord_guild_id,
-            )
-        else:
-            synced = await self.tree.sync()
-            logger.info("Synced %s global commands", len(synced))
+            await self.tree.sync(guild=discord.Object(id=self.settings.discord_guild_id))
+
+    async def process_commands(self, message: discord.Message) -> None:
+        return  # every message is handled by AgentCog.on_message
 
     async def close(self) -> None:
-        await self._stop_health_server()
+        if self._http_runner is not None:
+            await self._http_runner.cleanup()
+            self._http_runner = None
         await self.cursor.close()
         await super().close()
 
@@ -82,65 +54,27 @@ class CursorDiscordBot(commands.Bot):
         logger.info("Logged in as %s (%s)", self.user, self.user and self.user.id)
 
     async def _start_health_server(self) -> None:
-        app = web.Application()
-
         async def healthz(_: web.Request) -> web.Response:
             return web.Response(text="ok")
 
+        app = web.Application()
         app.router.add_get("/", healthz)
         app.router.add_get("/healthz", healthz)
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", self.settings.port)
-        await site.start()
+        await web.TCPSite(runner, "0.0.0.0", self.settings.port).start()
         self._http_runner = runner
         logger.info("health server on :%s", self.settings.port)
-
-    async def _stop_health_server(self) -> None:
-        if self._http_runner is not None:
-            await self._http_runner.cleanup()
-            self._http_runner = None
 
 
 def build_bot(settings: Settings | None = None) -> CursorDiscordBot:
     settings = settings or load_settings()
-    # Prefer local projects.yaml when developing outside the container
-    projects_path = settings.projects_path
-    local_fallback = Path("projects.yaml")
-    if not Path(projects_path).is_file() and local_fallback.is_file():
-        projects_path = str(local_fallback)
-    example = Path("projects.example.yaml")
-    if (
-        not settings.projects_json
-        and not Path(projects_path).is_file()
-        and example.is_file()
-    ):
-        projects_path = str(example)
-
-    registry = load_registry(
-        projects_json=settings.projects_json,
-        projects_path=projects_path,
-    )
-    logger.info(
-        "Loaded %s projects (default=%s)",
-        len(registry.projects),
-        registry.default,
-    )
-    policy = Policy(settings)
-    turns = TurnCoordinator()
     cursor = CursorAgentService(
         api_key=settings.cursor_api_key,
-        default_model=settings.cursor_model,
+        model=settings.cursor_model,
         bridge_workspace=settings.bridge_workspace,
-        turns=turns,
     )
-    return CursorDiscordBot(
-        settings=settings,
-        registry=registry,
-        policy=policy,
-        cursor=cursor,
-        turns=turns,
-    )
+    return CursorDiscordBot(settings=settings, policy=Policy(settings), cursor=cursor)
 
 
 def main() -> None:

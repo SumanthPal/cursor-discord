@@ -2,7 +2,6 @@
 __pycache__/
 *.py[cod]
 .env
-projects.yaml
 *.egg-info/
 dist/
 build/

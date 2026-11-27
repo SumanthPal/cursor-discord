@@ -25,22 +25,17 @@ offline (parsing, policy, refs, formatting, queueing), add a `test_*` function t
 All code is in `bot/`. Entry point: `bot/main.py` (`CursorDiscordBot`, plus an aiohttp
 `/healthz` server on `$PORT` for Cloud Run).
 
-- `commands.py` — `AgentCog`: every slash command and the `on_message` handler. Large file;
-  most features touch it.
-- `cursor_parse.py` — parses `@Cursor …` text: `repo=`/`branch=`/`model=`/`autopr=` options and
-  subcommands (`agent`, `settings`, `list my agents`, `help`).
-- `cursor_agent.py` — `CursorAgentService`, wraps `cursor-sdk` (create, follow-up, stream, cancel).
-- `cloud_steer.py` — raw REST call for `delivery: "steer"` (not in the SDK yet).
-- `turn_coordinator.py` — per-agent follow-up queue; steers busy runs, debounces bursts.
-- `agent_ref.py` — encodes/decodes the agent id stored in thread messages (`cursor-agent:` footer,
-  spoiler refs) so a thread can be mapped back to its agent.
-- `agent_sessions.py` — in-memory session metadata.
-- `channel_bind.py`, `projects.py`, `repo_refs.py` — channel ↔ repo binding and repo matching.
+- `commands.py` — `AgentCog.on_message`: the whole conversation (launch in a thread, follow-ups,
+  steer-or-queue while busy, stop, "which repo?", admin phrases). No slash commands.
+- `cursor_parse.py` — classifies plain-language messages: stop, "use owner/repo here",
+  "give @x access", hello; everything else is a task.
+- `cursor_agent.py` — `CursorAgentService`, wraps `cursor-sdk` (launch, follow-up, stream, cancel,
+  artifacts) plus the one REST call for `delivery: "steer"` (not in the SDK yet).
+- `agent_ref.py` — the `-# \`bc-…\`` subtext on finished replies that maps a thread back to its agent.
+- `repos.py` — repo name parsing/matching and the channel-topic binding.
 - `policy.py`, `config.py` — env settings, admin/member/guild access checks, rate limiting.
-- `multimodal.py`, `thread_context.py` — build agent prompts from Discord messages, images, and
-  prior thread history.
-- `chat_ui.py`, `agent_cards.py`, `ui.py`, `discord_text.py` — message formatting, status edits,
-  views, and Discord length limits.
+- `multimodal.py` — build agent prompts from Discord messages and image attachments.
+- `chat_ui.py`, `discord_text.py` — the live status message, reply text, PR button, length limits.
 - `cloud_artifacts.py` — fetch agent artifacts and upload them to Discord.
 
 ## Things that are easy to get wrong
@@ -51,15 +46,15 @@ All code is in `bot/`. Entry point: `bot/main.py` (`CursorDiscordBot`, plus an a
   Discord (or the Cursor API), not from a local cache.
 - **Access control.** Admins = `SUPERUSER_IDS`; members need the `CURSOR_ROLE_NAME` role and are
   limited to the channel's bound repos; with no `SUPERUSER_IDS`/`ALLOWED_USER_IDS` everyone is an
-  admin. Every new entry point (slash command, message path, button) must go through `Policy`.
+  admin. Every new entry point (message path, phrase, button) must go through `Policy`.
   Unauthorized plain messages in agent threads are ignored silently, not answered.
-- **Discord limits.** 2000-char messages, 100-char choice values, 25 MB uploads. Use the helpers
-  in `discord_text.py` / `repo_refs.py` instead of slicing strings ad hoc.
+- **Discord limits.** 2000-char messages, 25 MB uploads. Use the helpers in `discord_text.py`
+  instead of slicing strings ad hoc.
 - **Don't leak ids mid-run.** Agent and run ids are hidden while the status is "working" and shown
   once the run finishes.
-- **DMs vs guild threads.** Both paths exist and behave differently (mentions, follow-ups, ref
-  lookup); check both when changing message handling.
-- Secrets come from env / Secret Manager. Never commit `.env` or put tokens in `projects.yaml`.
+- **Conversational by design.** No slash commands, embeds, or menus; new features should show up
+  as plain messages in the thread. DMs are ignored.
+- Secrets come from env / Secret Manager. Never commit `.env`.
 
 ## Deploy
 
@@ -73,4 +68,4 @@ Cursor Bugbot reviews every PR push; address its findings before calling a PR do
   `logging.getLogger(__name__)`.
 - Commit messages: short imperative subject describing the behavior change
   (e.g. "Ignore unauthorized plain replies in guild agent threads").
-- Update `README.md` and `.env.example` when you add a command, option, or env var.
+- Update `README.md` and `.env.example` when you add a phrase, behavior, or env var.

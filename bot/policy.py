@@ -18,10 +18,9 @@ class Policy:
         if not allowed:
             return None
         if guild is None:
-            # DMs are authorized via check_user (not tied to a guild).
             return None
         if guild.id not in allowed:
-            return "This server is not allowlisted for the Cursor bot."
+            return "I'm not enabled for this server."
         return None
 
     @property
@@ -46,12 +45,12 @@ class Policy:
             or self.has_grant(user)
         ):
             return None
-        return "You don't have access to Cursor here. Ask an admin to `/grant` you."
+        return "You don't have access to me yet. Ask an admin to give you access."
 
     def check_admin(self, user: discord.abc.User) -> str | None:
         if self.is_admin(user):
             return None
-        return "Only Cursor admins (`SUPERUSER_IDS`) can do that."
+        return "Only admins can do that."
 
     def check_rate(self, user: discord.abc.User) -> str | None:
         now = time.monotonic()
@@ -61,8 +60,8 @@ class Policy:
             q.popleft()
         if len(q) >= self.settings.rate_limit_max:
             return (
-                f"Rate limit: max {self.settings.rate_limit_max} "
-                f"actions / {int(window)}s. Try again shortly."
+                f"That's a lot of requests at once (max {self.settings.rate_limit_max} "
+                f"per {int(window)}s). Give me a moment and try again."
             )
         q.append(now)
         return None
