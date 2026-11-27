@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,10 @@ class TurnResult:
 def is_busy_error(exc: BaseException) -> bool:
     text = str(exc).lower()
     return "agent_busy" in text or "active run" in text
+
+
+def is_not_found_error(exc: BaseException) -> bool:
+    return "agent_not_found" in str(exc).lower()
 
 
 class CursorAgentService:
@@ -193,7 +198,12 @@ class CursorAgentService:
             if is_busy_error(err):
                 raise
             logger.warning("run failed for %s: %s", agent_id, err)
-            return TurnResult(agent_id=agent_id, status="error", error=str(err))
+            # No run means Cursor never kept the agent (e.g. out of usage): don't hand
+            # out an id that will 404 on the next follow-up.
+            started = agent_id in self._runs
+            return TurnResult(
+                agent_id=agent_id if started else "", status="error", error=friendly_error(err)
+            )
         finally:
             self._starting.discard(agent_id)
             self._cancel_on_start.discard(agent_id)
@@ -208,6 +218,12 @@ class CursorAgentService:
             pr_url=(branches[0].pr_url or None) if branches else None,
             error=result.error_message,
         )
+
+
+def friendly_error(err: object) -> str:
+    """`invalid_argument: [usage_limit_exceeded] Your balance…` → `Your balance…`."""
+    text = str(err).strip()
+    return re.sub(r"^[a-z_]+:\s*(\[[a-z_]+\]\s*)?", "", text) or text
 
 
 def activity_line(message: Any) -> str:

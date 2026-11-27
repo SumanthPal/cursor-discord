@@ -62,21 +62,32 @@ def repo_tokens(text: str) -> list[str]:
 def find_repo_in_text(text: str, candidates: list[str] | None = None) -> str | None:
     """The repo a message names, if any.
 
-    A repo (GitHub URL or ``owner/repo``) counts when it is the first word, or anywhere
-    if it matches one of ``candidates``. So a file path or a link to some other repo
-    mid-sentence doesn't override the channel's repo.
+    A GitHub URL counts when it leads the message ("in https://github.com/a/b, …").
+    Anything else (URL or bare ``owner/repo``) counts only if it matches one of
+    ``candidates``, because a bare ``src/app.py`` looks exactly like a repo name.
     """
-    tokens = repo_tokens(text)
-    words = (text or "").split()
-    while words and words[0].lower() in _LEAD_WORDS:
-        words = words[1:]  # "in acme/web, add dark mode"
-    if tokens and words and repo_tokens(words[0]):
-        return repo_tokens(words[0])[0]
-    for token in tokens:
+    lead = _lead_word(text)
+    if lead and _GITHUB_URL_RE.match(lead):
+        return repo_tokens(lead)[0]
+    for token in repo_tokens(text):
         for cand in candidates or []:
             if same_repo(token, cand):
                 return normalize_repo(cand)
     return None
+
+
+def leading_repo_name(text: str) -> str | None:
+    """A bare ``owner/repo`` leading the message. Might be a file path: check it exists."""
+    lead = _lead_word(text)
+    tokens = repo_tokens(lead) if lead else []
+    return tokens[0] if tokens else None
+
+
+def _lead_word(text: str) -> str | None:
+    words = (text or "").split()
+    while words and words[0].lower() in _LEAD_WORDS:
+        words = words[1:]  # "in acme/web, add dark mode"
+    return words[0] if words else None
 
 
 def match_allowed_repo(typed: str, allowed: list[str]) -> str | None:

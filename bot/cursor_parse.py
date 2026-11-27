@@ -63,6 +63,7 @@ def _words(text: str) -> list[str]:
     cleaned = _MENTION_RE.sub(" ", text or "").lower().replace("’", "'")
     cleaned = re.sub(r"(?<=\s)'s\b|^'s\b", " 's", cleaned)
     cleaned = re.sub(r"[,.!;:]+(?=\s|$)", " ", cleaned)
+    cleaned = re.sub(r"(?<!\S)[-–—:=>]+(?!\S)", " ", cleaned)  # "use this - acme/web"
     return cleaned.split()
 
 

@@ -6,7 +6,7 @@ import time
 import discord
 
 from bot.agent_ref import ref_trailer
-from bot.cursor_agent import TurnResult
+from bot.cursor_agent import TurnResult, friendly_error
 from bot.discord_text import DISCORD_CONTENT_MAX, clip_discord, split_discord
 from bot.repos import compact_repo
 
@@ -20,7 +20,7 @@ def working(repo: str | None = None) -> str:
 
 
 def failed(exc: object) -> str:
-    return clip_discord(f"I couldn't get that going: {exc}")
+    return clip_discord(f"I couldn't get that going: {friendly_error(exc)}")
 
 
 def reply_chunks(result: TurnResult) -> list[str]:

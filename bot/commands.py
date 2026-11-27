@@ -16,13 +16,14 @@ from discord.ext import commands
 from bot import chat_ui
 from bot.agent_ref import find_agent_in_thread
 from bot.cloud_artifacts import deliver_new_cloud_artifacts
-from bot.cursor_agent import TurnResult, is_busy_error
+from bot.cursor_agent import TurnResult, is_busy_error, is_not_found_error
 from bot.cursor_parse import Intent, Parsed, classify, is_stop, strip_bot_mention
 from bot.multimodal import AgentPrompt, agent_prompt_from_message, merge_agent_prompts
 from bot.repos import (
     channel_repos,
     compact_repo,
     find_repo_in_text,
+    leading_repo_name,
     format_repos,
     match_allowed_repo,
     same_repo,
@@ -69,10 +70,13 @@ class ThreadState:
     agent_id: str | None = None
     busy: bool = False
     pending: list[AgentPrompt] = field(default_factory=list)
+    # Repo the thread was launched in (unknown for threads recovered after a redeploy).
+    # With no live agent, the next reply relaunches here.
+    repo: str | None = None
 
     @property
     def is_agent(self) -> bool:
-        return self.agent_id is not None or self.busy
+        return self.agent_id is not None or self.busy or self.repo is not None
 
 
 @dataclass
@@ -167,7 +171,7 @@ class AgentCog(commands.Cog):
         except discord.HTTPException:
             state.busy = False
             raise
-        await self._converse(message.channel, state, prompt, status=status)
+        await self._converse(message.channel, state, prompt, status=status, author=message.author)
 
     async def _stop(self, message: discord.Message, state: ThreadState) -> None:
         state.pending.clear()
@@ -242,6 +246,14 @@ class AgentCog(commands.Cog):
         bound = await channel_repos(self.bot, message.channel)
         admin = self.bot.policy.is_admin(message.author)
         named = find_repo_in_text(text, bound)
+        if named is None and (lead := leading_repo_name(text)):
+            # "acme/web fix the header" vs "src/app.py is broken": only a real repo counts.
+            try:
+                known = await self.bot.cursor.list_repos()
+            except Exception:  # noqa: BLE001
+                logger.warning("list_repos failed while checking %s", lead, exc_info=True)
+                known = []
+            named = next((r for r in known if same_repo(r, lead)), None)
 
         if named:
             matched = match_allowed_repo(named, bound) if bound else None
@@ -439,13 +451,13 @@ class AgentCog(commands.Cog):
                 )
                 return
         # Busy from the start: replies before the agent exists get queued, not dropped.
-        state = self.threads[thread.id] = ThreadState(busy=True)
+        state = self.threads[thread.id] = ThreadState(busy=True, repo=repo)
         try:
             status = await thread.send(chat_ui.working(repo))
         except discord.HTTPException:
             state.busy = False
             raise
-        await self._converse(thread, state, prompt, status=status, repo=repo, author=message.author)
+        await self._converse(thread, state, prompt, status=status, author=message.author)
 
     async def _converse(
         self,
@@ -454,26 +466,24 @@ class AgentCog(commands.Cog):
         prompt: AgentPrompt,
         *,
         status: discord.Message,
-        repo: str | None = None,
         author: discord.abc.User | None = None,
     ) -> None:
         """Run a turn, then any messages that arrived meanwhile, until the queue is empty."""
         state.busy = True
         try:
             while True:
-                await self._turn(thread, state, prompt, status, repo=repo, author=author)
+                await self._turn(thread, state, prompt, status, author=author)
                 if state.pending and state.agent_id is None:
                     state.pending.clear()
                     await thread.send(
                         "Since that didn't start, I didn't get to your other messages "
-                        "either. Mention me again to retry."
+                        "either. Reply here to try again."
                     )
                     return
                 if not state.pending:
                     return
                 prompt = merge_agent_prompts(state.pending)
                 state.pending.clear()
-                repo = None
                 status = await thread.send(chat_ui.working())
         finally:
             state.busy = False
@@ -485,19 +495,20 @@ class AgentCog(commands.Cog):
         prompt: AgentPrompt,
         status_message: discord.Message,
         *,
-        repo: str | None,
         author: discord.abc.User | None,
     ) -> None:
+        """Follow up with the thread's agent, or (re)launch one in ``state.repo``."""
         status = chat_ui.StatusMessage(status_message)
 
         async def on_started(agent_id: str) -> None:
             state.agent_id = agent_id
 
-        try:
-            if repo is not None:
-                result = await self.bot.cursor.launch(
+        async def launch() -> TurnResult:
+            assert state.repo is not None
+            try:
+                return await self.bot.cursor.launch(
                     prompt.sdk_message(),
-                    repo_url=repo,
+                    repo_url=state.repo,
                     metadata={
                         "source": "discord",
                         "thread_id": str(getattr(thread, "id", "")),
@@ -506,20 +517,36 @@ class AgentCog(commands.Cog):
                     on_started=on_started,
                     on_activity=status.activity,
                 )
+            except Exception:
+                state.agent_id = None  # never got going: nothing to follow up on
+                raise
+
+        try:
+            if state.agent_id is None:
+                result = await launch()
             else:
-                assert state.agent_id is not None
-                result = await self.bot.cursor.follow_up(
-                    state.agent_id, prompt.sdk_message(), on_activity=status.activity
-                )
+                try:
+                    result = await self.bot.cursor.follow_up(
+                        state.agent_id, prompt.sdk_message(), on_activity=status.activity
+                    )
+                except Exception as exc:
+                    if not (is_not_found_error(exc) and state.repo):
+                        raise
+                    state.agent_id = None  # agent is gone on Cursor's side: start fresh
+                    result = await launch()
         except Exception as exc:  # noqa: BLE001
             # A run we didn't start (e.g. before a redeploy) is still going: steer it.
-            if repo is None and is_busy_error(exc) and state.agent_id:
+            if is_busy_error(exc) and state.agent_id:
                 if await self._try_steer(state.agent_id, prompt):
                     await status.finish("I'm still working on the last thing. I'll fold this in.")
                     return
+            if is_not_found_error(exc):
+                state.agent_id = None
             logger.exception("agent turn failed")
             await status.finish(chat_ui.failed(exc))
             return
+        if not result.agent_id:
+            state.agent_id = None  # Cursor never kept the agent; a reply retries
         await self._reply(thread, status, result)
 
     async def _reply(

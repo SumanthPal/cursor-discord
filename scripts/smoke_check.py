@@ -20,7 +20,7 @@ from bot.cloud_artifacts import (  # noqa: E402
     is_image_artifact,
 )
 from bot.config import DEFAULT_MODEL, Settings  # noqa: E402
-from bot.cursor_agent import TurnResult, activity_line, is_busy_error  # noqa: E402
+from bot.cursor_agent import TurnResult, activity_line, friendly_error, is_busy_error  # noqa: E402
 from bot.cursor_parse import Intent, classify, is_stop, strip_bot_mention  # noqa: E402
 from bot.discord_text import split_discord  # noqa: E402
 from bot.multimodal import AgentPrompt, is_image_attachment, merge_agent_prompts  # noqa: E402
@@ -28,6 +28,7 @@ from bot.policy import Policy  # noqa: E402
 from bot.repos import (  # noqa: E402
     compact_repo,
     find_repo_in_text,
+    leading_repo_name,
     format_repos,
     match_allowed_repo,
     normalize_repo,
@@ -108,9 +109,14 @@ def test_repos() -> None:
     assert set_channel_repo_topic(topic, []) == "Frontend work"
     assert parse_channel_repos("no binding") == []
 
-    assert find_repo_in_text("acme/web fix the header") == A
+    assert find_repo_in_text("acme/web fix the header", [A]) == A
     assert find_repo_in_text("in https://github.com/acme/api, add caching") == B
-    assert find_repo_in_text("in acme/api, add caching") == B
+    assert find_repo_in_text("in acme/api, add caching", [A, B]) == B
+    # A leading bare name is only a candidate; the bot checks it against real repos.
+    assert find_repo_in_text("in src/auth.py, fix the session cookie", [A, B]) is None
+    assert leading_repo_name("in src/auth.py, fix it") == "https://github.com/src/auth.py"
+    assert leading_repo_name("acme/web fix the header") == A
+    assert leading_repo_name("fix the header") is None
     assert find_repo_in_text("in acme/api add caching", [A, B]) == B
     # A file path mid-sentence is not a repo.
     assert find_repo_in_text("fix the bug in src/app.py", [A, B]) is None
@@ -145,6 +151,8 @@ def test_intents() -> None:
 
     assert classify("use acme/web here").repos == [A]
     assert intent("use acme/web here") == Intent.BIND
+    assert intent("use this - https://github.com/acme/web") == Intent.BIND
+    assert intent("repo: acme/web") == Intent.BIND
     assert intent("acme/web") == Intent.BIND
     assert intent("work on acme/web and acme/api in this channel") == Intent.BIND
     assert intent("stop using acme/web here") == Intent.UNBIND
@@ -218,6 +226,10 @@ def test_activity_line() -> None:
         message=SimpleNamespace(content=[SimpleNamespace(type="text", text="Looking.\nFound the bug.")]),
     )
     assert activity_line(said) == "Found the bug."
+    assert friendly_error(RuntimeError(
+        "invalid_argument: [usage_limit_exceeded] Your prepaid balance is used up."
+    )) == "Your prepaid balance is used up."
+    assert friendly_error("plain message") == "plain message"
     assert is_busy_error(RuntimeError("agent_busy: has an active run"))
     assert not is_busy_error(RuntimeError("repo not found"))
     print("ok activity_line")
@@ -303,10 +315,10 @@ async def _run_conversation(*, steer_ok: bool) -> tuple[FakeCursor, FakeThread]:
     cursor = FakeCursor(steer_ok=steer_ok)
     cog = AgentCog(SimpleNamespace(cursor=cursor))  # type: ignore[arg-type]
     thread = FakeThread()
-    state = cog.threads[thread.id] = ThreadState()
+    state = cog.threads[thread.id] = ThreadState(repo=A)
     status = await thread.send(chat_ui.working(A))
     run = asyncio.create_task(
-        cog._converse(thread, state, AgentPrompt.from_text("fix it"), status=status, repo=A)  # type: ignore[arg-type]
+        cog._converse(thread, state, AgentPrompt.from_text("fix it"), status=status)  # type: ignore[arg-type]
     )
     await asyncio.sleep(0)
     assert state.busy and state.agent_id == "bc-test"
@@ -374,6 +386,56 @@ def test_stop_during_startup() -> None:
     print("ok stop_during_startup")
 
 
+class FlakyCursor:
+    """First launch is refused (no agent kept); follow-ups to a dead agent 404."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def launch(self, prompt, *, repo_url, metadata, on_started, on_activity):
+        self.calls.append(f"launch:{repo_url}")
+        await on_started("bc-new")
+        if len(self.calls) == 1:
+            return TurnResult(agent_id="", status="error", error="Your prepaid balance is used up.")
+        return TurnResult(agent_id="bc-new", status="finished", text="Hello!")
+
+    async def follow_up(self, agent_id, prompt, *, on_activity):
+        self.calls.append(f"follow_up:{agent_id}")
+        raise RuntimeError("not_found: [agent_not_found] Agent not found")
+
+    async def list_artifacts(self, agent_id):
+        return []
+
+
+async def _failed_launch_then_retry() -> None:
+    from bot.commands import AgentCog, ThreadState
+
+    cursor = FlakyCursor()
+    cog = AgentCog(SimpleNamespace(cursor=cursor))  # type: ignore[arg-type]
+    thread = FakeThread()
+    state = cog.threads[thread.id] = ThreadState(repo=A)
+    status = await thread.send(chat_ui.working(A))
+    await cog._converse(thread, state, AgentPrompt.from_text("go"), status=status)  # type: ignore[arg-type]
+    assert "prepaid balance" in status.content and "bc-" not in status.content
+    assert state.agent_id is None and state.is_agent  # still our thread; a reply retries
+
+    retry = await thread.send(chat_ui.working())
+    await cog._converse(thread, state, AgentPrompt.from_text("hello"), status=retry)  # type: ignore[arg-type]
+    assert cursor.calls == [f"launch:{A}", f"launch:{A}"]
+    assert state.agent_id == "bc-new" and retry.content.startswith("Hello!")
+
+    # The agent later vanishes on Cursor's side: relaunch instead of a 404.
+    again = await thread.send(chat_ui.working())
+    await cog._converse(thread, state, AgentPrompt.from_text("more"), status=again)  # type: ignore[arg-type]
+    assert cursor.calls[-2:] == ["follow_up:bc-new", f"launch:{A}"]
+    assert again.content.startswith("Hello!")
+
+
+def test_failed_launch_retry() -> None:
+    asyncio.run(_failed_launch_then_retry())
+    print("ok failed_launch_retry")
+
+
 def test_conversation_queue() -> None:
     cursor, thread = asyncio.run(_run_conversation(steer_ok=False))
     assert [c[0] for c in cursor.calls] == ["launch", "steer", "follow_up"]
@@ -398,6 +460,7 @@ def main() -> None:
     test_multimodal_prompt()
     test_conversation_queue()
     test_stop_during_startup()
+    test_failed_launch_retry()
     print("\nSMOKE OK")
 
 
