@@ -110,10 +110,14 @@ def test_repos() -> None:
 
     assert find_repo_in_text("acme/web fix the header") == A
     assert find_repo_in_text("in https://github.com/acme/api, add caching") == B
+    assert find_repo_in_text("in acme/api, add caching") == B
     assert find_repo_in_text("in acme/api add caching", [A, B]) == B
     # A file path mid-sentence is not a repo.
     assert find_repo_in_text("fix the bug in src/app.py", [A, B]) is None
     assert find_repo_in_text("fix the login test") is None
+    # A link to some other repo mid-sentence doesn't override the channel's repos.
+    assert find_repo_in_text("see https://github.com/other/lib for reference", [A, B]) is None
+    assert find_repo_in_text("https://github.com/other/lib fix the build") == "https://github.com/other/lib"
 
     assert match_allowed_repo("api", [A, B]) == B
     assert match_allowed_repo("acme", [A, B]) is None  # ambiguous
@@ -155,6 +159,10 @@ def test_intents() -> None:
     # Mentioning someone in an actual task stays a task.
     assert intent("give <@5>'s PR a review", mentions_people=True) == Intent.TASK
     assert intent("give access", mentions_people=False) == Intent.TASK
+    assert intent("remove <@5> from the reviewers list", mentions_people=True) == Intent.TASK
+    assert intent("give <@5> access to the staging db", mentions_people=True) == Intent.TASK
+    assert intent("remove <@5>", mentions_people=True) == Intent.TASK
+    assert intent("take away <@5>’s access", mentions_people=True) == Intent.REVOKE
 
     assert strip_bot_mention("<@42> fix it", 42) == "fix it"
     assert strip_bot_mention("<@!42>", 42) == ""
@@ -315,6 +323,57 @@ async def _run_conversation(*, steer_ok: bool) -> tuple[FakeCursor, FakeThread]:
     return cursor, thread
 
 
+async def _stop_during_startup() -> None:
+    from bot.cursor_agent import CursorAgentService
+
+    class Run:
+        cancelled = False
+
+        async def cancel(self) -> None:
+            self.cancelled = True
+
+        async def stream(self):
+            yield SimpleNamespace(
+                type="assistant",
+                message=SimpleNamespace(content=[SimpleNamespace(type="text", text="Streamed answer")]),
+            )
+
+        async def wait(self):
+            return SimpleNamespace(status="cancelled", result="", git=None, error_message=None)
+
+    run = Run()
+    gate = asyncio.Event()
+
+    class Agent:
+        agent_id = "bc-x"
+
+        async def send(self, _prompt):
+            await gate.wait()
+            return run
+
+        async def close(self) -> None:
+            pass
+
+    svc = CursorAgentService(api_key="k", model="m", bridge_workspace="/tmp/x")
+
+    async def no_activity(_line: str) -> None:
+        pass
+
+    task = asyncio.create_task(svc._send(Agent(), "go", no_activity))  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    assert await svc.cancel("bc-x")  # before send() returned
+    gate.set()
+    result = await task
+    assert run.cancelled and result.status == "cancelled"
+    # Empty final result falls back to what the agent streamed.
+    assert result.text == "Streamed answer"
+
+
+def test_stop_during_startup() -> None:
+    asyncio.run(_stop_during_startup())
+    print("ok stop_during_startup")
+
+
 def test_conversation_queue() -> None:
     cursor, thread = asyncio.run(_run_conversation(steer_ok=False))
     assert [c[0] for c in cursor.calls] == ["launch", "steer", "follow_up"]
@@ -338,6 +397,7 @@ def main() -> None:
     test_cloud_artifacts()
     test_multimodal_prompt()
     test_conversation_queue()
+    test_stop_during_startup()
     print("\nSMOKE OK")
 
 

@@ -51,6 +51,8 @@ class CursorAgentService:
         self.bridge_workspace = bridge_workspace
         self._client: AsyncClient | None = None
         self._runs: dict[str, AsyncRun] = {}
+        self._starting: set[str] = set()  # send() in flight, run not known yet
+        self._cancel_on_start: set[str] = set()
 
     @property
     def client(self) -> AsyncClient:
@@ -130,12 +132,15 @@ class CursorAgentService:
         if run is not None:
             await run.cancel()
             return True
+        if agent_id in self._starting:
+            self._cancel_on_start.add(agent_id)  # _send cancels as soon as the run exists
+            return True
         # Not started by this process (e.g. after a redeploy): ask the API.
         runs = await self.client.list_runs(
             agent_id, runtime="cloud", limit=1, api_key=self.api_key
         )
         latest = runs.items[0] if runs.items else None
-        if latest is None or latest.status != "running":
+        if latest is None or latest.status in {"finished", "error", "cancelled", "expired"}:
             return False
         await self.client.cancel_run(latest.id, agent_id=agent_id)
         return True
@@ -168,11 +173,17 @@ class CursorAgentService:
         self, agent: AsyncAgent, prompt: AgentMessage, on_activity: OnActivity
     ) -> TurnResult:
         agent_id = agent.agent_id
+        self._starting.add(agent_id)
         try:
             run = await agent.send(prompt)
+            self._starting.discard(agent_id)
             self._runs[agent_id] = run
+            if agent_id in self._cancel_on_start:
+                await run.cancel()
             last_line = ""
+            last_text = ""
             async for message in run.stream():
+                last_text = assistant_text(message) or last_text
                 line = activity_line(message)
                 if line and line != last_line:
                     last_line = line
@@ -184,6 +195,8 @@ class CursorAgentService:
             logger.warning("run failed for %s: %s", agent_id, err)
             return TurnResult(agent_id=agent_id, status="error", error=str(err))
         finally:
+            self._starting.discard(agent_id)
+            self._cancel_on_start.discard(agent_id)
             self._runs.pop(agent_id, None)
             await agent.close()
 
@@ -191,7 +204,7 @@ class CursorAgentService:
         return TurnResult(
             agent_id=agent_id,
             status=str(getattr(result.status, "value", result.status)),
-            text=(result.result or "").strip(),
+            text=(result.result or last_text).strip(),
             pr_url=(branches[0].pr_url or None) if branches else None,
             error=result.error_message,
         )

@@ -27,8 +27,14 @@ _BIND_FILLER = frozenset(
     }
 )
 _UNBIND_WORDS = frozenset({"stop", "remove", "forget", "unbind", "drop", "longer", "anymore"})
-_REVOKE_RE = re.compile(r"\b(revoke|remove|take away|take|drop|kick)\b")
-_GRANT_RE = re.compile(r"\b(give|grant|add|let|allow)\b")
+_REVOKE_WORDS = frozenset({"revoke", "remove", "take", "drop", "kick"})
+_GRANT_WORDS = frozenset({"give", "grant", "add", "let", "allow"})
+# Every word of a grant/revoke request (besides the mentions) must be one of these,
+# so "remove @bob from the reviewers list" stays a task.
+_ACCESS_FILLER = _REVOKE_WORDS | _GRANT_WORDS | frozenset(
+    {"access", "'s", "’s", "away", "to", "from", "use", "you", "cursor", "the", "bot",
+     "me", "please", "pls", "and", "&", "their", "his", "her", "of"}
+)
 _GREETINGS = frozenset(
     {"", "hi", "hello", "hey", "yo", "help", "?", "what can you do", "what can you do?",
      "how do i use you", "how do i use you?", "how does this work", "how does this work?"}
@@ -54,7 +60,8 @@ class Parsed:
 
 
 def _words(text: str) -> list[str]:
-    cleaned = _MENTION_RE.sub(" ", text or "").lower()
+    cleaned = _MENTION_RE.sub(" ", text or "").lower().replace("’", "'")
+    cleaned = re.sub(r"(?<=\s)'s\b|^'s\b", " 's", cleaned)
     cleaned = re.sub(r"[,.!;:]+(?=\s|$)", " ", cleaned)
     return cleaned.split()
 
@@ -73,11 +80,11 @@ def classify(text: str, *, mentions_people: bool = False, has_files: bool = Fals
     if is_stop(text):
         return Parsed(Intent.STOP)
 
-    if mentions_people and len(words) <= MAX_ADMIN_WORDS:
-        about_access = "access" in joined or "use you" in joined or "use cursor" in joined
-        if _REVOKE_RE.search(joined) and (about_access or words[0] in {"revoke", "remove"}):
+    if mentions_people and words and len(words) <= MAX_ADMIN_WORDS and set(words) <= _ACCESS_FILLER:
+        about_access = "access" in words or "use" in words
+        if _REVOKE_WORDS & set(words) and (about_access or words[0] == "revoke"):
             return Parsed(Intent.REVOKE)
-        if _GRANT_RE.search(joined) and (about_access or words[0] == "grant"):
+        if _GRANT_WORDS & set(words) and (about_access or words[0] == "grant"):
             return Parsed(Intent.GRANT)
 
     repos = repo_tokens(text)

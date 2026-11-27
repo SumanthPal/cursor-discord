@@ -17,6 +17,7 @@ _GITHUB_URL_RE = re.compile(
 )
 _OWNER_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _TOKEN_TRIM = "`'\"()[]<>,.;:!?"
+_LEAD_WORDS = frozenset({"in", "on", "for", "using", "with", "at"})
 
 
 def normalize_repo(value: str) -> str:
@@ -61,22 +62,19 @@ def repo_tokens(text: str) -> list[str]:
 def find_repo_in_text(text: str, candidates: list[str] | None = None) -> str | None:
     """The repo a message names, if any.
 
-    A GitHub URL anywhere counts. A bare ``owner/repo`` counts when it is the first
-    word, or anywhere if it matches one of ``candidates`` (so a path like
-    ``src/app.py`` mid-sentence isn't mistaken for a repo).
+    A repo (GitHub URL or ``owner/repo``) counts when it is the first word, or anywhere
+    if it matches one of ``candidates``. So a file path or a link to some other repo
+    mid-sentence doesn't override the channel's repo.
     """
-    raw = (text or "").strip()
-    url = _GITHUB_URL_RE.search(raw)
-    if url:
-        return normalize_repo(url.group(1))
-    words = [w.strip(_TOKEN_TRIM) for w in raw.split()]
-    if words and _OWNER_REPO_RE.match(words[0]):
-        return normalize_repo(words[0])
-    for word in words:
-        if not _OWNER_REPO_RE.match(word):
-            continue
+    tokens = repo_tokens(text)
+    words = (text or "").split()
+    while words and words[0].lower() in _LEAD_WORDS:
+        words = words[1:]  # "in acme/web, add dark mode"
+    if tokens and words and repo_tokens(words[0]):
+        return repo_tokens(words[0])[0]
+    for token in tokens:
         for cand in candidates or []:
-            if same_repo(word, cand):
+            if same_repo(token, cand):
                 return normalize_repo(cand)
     return None
 

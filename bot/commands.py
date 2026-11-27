@@ -462,8 +462,14 @@ class AgentCog(commands.Cog):
         try:
             while True:
                 await self._turn(thread, state, prompt, status, repo=repo, author=author)
-                if not state.pending or state.agent_id is None:
+                if state.pending and state.agent_id is None:
                     state.pending.clear()
+                    await thread.send(
+                        "Since that didn't start, I didn't get to your other messages "
+                        "either. Mention me again to retry."
+                    )
+                    return
+                if not state.pending:
                     return
                 prompt = merge_agent_prompts(state.pending)
                 state.pending.clear()
