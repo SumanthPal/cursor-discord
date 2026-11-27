@@ -74,9 +74,6 @@ if command -v gh >/dev/null; then
   gh secret set DISCORD_CLIENT_ID --body "${DISCORD_CLIENT_ID}"
   gh secret set CURSOR_API_KEY --body "${CURSOR_API_KEY}"
   gh secret set GCP_PROJECT --body "${GCP_PROJECT}"
-  if [[ -n "${PROJECTS_JSON:-}" ]]; then
-    gh secret set PROJECTS_JSON --body "${PROJECTS_JSON}"
-  fi
   if [[ -n "${SUPERUSER_IDS:-}" ]]; then
     gh secret set SUPERUSER_IDS --body "${SUPERUSER_IDS}"
   fi

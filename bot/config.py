@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+DEFAULT_MODEL = "composer-2.5"
+
 
 def _csv_ids(raw: str | None) -> frozenset[int]:
     if not raw or not raw.strip():
@@ -24,8 +26,6 @@ class Settings:
     discord_client_id: str
     cursor_api_key: str
     cursor_model: str
-    projects_json: str | None
-    projects_path: str
     allowed_user_ids: frozenset[int]
     allowed_guild_ids: frozenset[int]
     superuser_ids: frozenset[int]
@@ -57,10 +57,7 @@ def load_settings() -> Settings:
         discord_token=discord_token,
         discord_client_id=discord_client_id,
         cursor_api_key=cursor_api_key,
-        cursor_model=os.environ.get("CURSOR_MODEL", "composer-2.5").strip()
-        or "composer-2.5",
-        projects_json=os.environ.get("PROJECTS_JSON"),
-        projects_path=os.environ.get("PROJECTS_PATH", "/app/projects.yaml"),
+        cursor_model=os.environ.get("CURSOR_MODEL", "").strip() or DEFAULT_MODEL,
         allowed_user_ids=_csv_ids(os.environ.get("ALLOWED_USER_IDS")),
         allowed_guild_ids=_csv_ids(os.environ.get("ALLOWED_GUILD_IDS")),
         superuser_ids=_csv_ids(os.environ.get("SUPERUSER_IDS")),

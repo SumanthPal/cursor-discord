@@ -1,121 +1,92 @@
+"""What the bot says in a thread: one status message edited in place, then a plain reply."""
 from __future__ import annotations
 
 import time
 
 import discord
 
-from bot.agent_ref import (
-    ACTIVE_AGENT_STATUSES,
-    chat_done,
-    chat_progress,
-    chat_working,
-    ref_spoiler,
-)
-from bot.discord_text import DISCORD_CONTENT_MAX, clip_discord
+from bot.agent_ref import ref_trailer
+from bot.cursor_agent import TurnResult, friendly_error
+from bot.discord_text import DISCORD_CONTENT_MAX, clip_discord, split_discord
+from bot.repos import compact_repo
+
+MAX_REPLY_MESSAGES = 4
 
 
-def chat_ack(
-    *,
-    prompt: str,
-    repo: str | None = None,
-    echo_prompt: bool = True,
-) -> str:
-    """First bot line when a run starts — echoes the ask unless the thread anchor is the user message."""
-    lines: list[str] = []
-    if echo_prompt:
-        cleaned = " ".join((prompt or "").split())
-        if len(cleaned) > 400:
-            cleaned = cleaned[:397] + "…"
-        if cleaned:
-            lines.append(cleaned)
-    lines.append(chat_working(repo=repo))
-    return clip_discord("\n".join(lines))
+def working(repo: str | None = None) -> str:
+    if repo:
+        return f"On it, working in `{compact_repo(repo)}`…"
+    return "On it…"
 
 
-def chat_status_body(
-    *,
-    agent_id: str,
-    status: str,
-    repo: str | None = None,
-    snippet: str | None = None,
-    summary: str | None = None,
-    run_id: str | None = None,
-    pr_url: str | None = None,
-    error: str | None = None,
-) -> str:
-    key = (status or "").lower()
-    if error:
-        key = "error"
-        summary = error
-
-    if key in ACTIVE_AGENT_STATUSES:
-        if snippet and snippet.strip():
-            base = chat_progress(snippet.strip())
-        else:
-            base = chat_working(repo=repo)
-        return clip_discord(base)
-
-    text = chat_done(
-        agent_id=agent_id if agent_id not in {"", "pending"} else "pending",
-        status=key,
-        summary=summary,
-        run_id=run_id,
-        pr_url=pr_url,
-        repo=repo,
-    )
-    if key in {"finished", "completed", "done"} and agent_id not in {"", "pending"}:
-        hint = "reply here to follow up · `/cancel` to stop"
-        if pr_url:
-            hint = "reply here to follow up"
-        trailer = ref_spoiler(agent_id, run_id)
-        if trailer and trailer in text:
-            body = text[: text.rfind(trailer)].rstrip()
-            combined = f"{body}\n_{hint}_\n{trailer}"
-            if len(combined) <= DISCORD_CONTENT_MAX:
-                return combined
-            room = DISCORD_CONTENT_MAX - len(trailer) - 1
-            return clip_discord(body, max(1, room)) + "\n" + trailer
-        return clip_discord(f"{text}\n_{hint}_")
-    return text
+def failed(exc: object) -> str:
+    return clip_discord(f"I couldn't get that going: {friendly_error(exc)}")
 
 
-class ChatStatusEditor:
-    """Edits one Discord message in place with rate-safe throttling."""
+def reply_chunks(result: TurnResult) -> list[str]:
+    """The finished reply, split for Discord, with the agent id as subtext at the end."""
+    if result.status == "cancelled":
+        body = "Stopped."
+    elif result.status == "expired":
+        body = "That run timed out before finishing."
+    elif result.status == "error":
+        body = f"I ran into a problem: {result.error or 'unknown error'}"
+        if result.text:
+            body += f"\n\n{result.text}"
+    else:
+        body = result.text or "Done."
 
-    def __init__(
-        self,
-        message: discord.Message,
-        *,
-        min_interval_sec: float = 1.25,
-    ) -> None:
+    trailer = ref_trailer(result.agent_id)
+    chunks = split_discord(body, DISCORD_CONTENT_MAX - len(trailer) - 1) or [""]
+    if len(chunks) > MAX_REPLY_MESSAGES:
+        chunks = chunks[:MAX_REPLY_MESSAGES]
+        more = f"\n… (the rest is at https://cursor.com/agents/{result.agent_id})"
+        chunks[-1] = clip_discord(chunks[-1], DISCORD_CONTENT_MAX - len(trailer) - len(more) - 1) + more
+    if trailer:
+        chunks[-1] = f"{chunks[-1]}\n{trailer}".strip()
+    return chunks
+
+
+def pr_button(pr_url: str | None) -> discord.ui.View | None:
+    if not pr_url:
+        return None
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(label="View PR", url=pr_url, style=discord.ButtonStyle.link))
+    return view
+
+
+class StatusMessage:
+    """One bot message that shows live activity, edited at most every ``min_interval`` s."""
+
+    def __init__(self, message: discord.Message, *, min_interval: float = 1.5) -> None:
         self.message = message
-        self.min_interval_sec = min_interval_sec
+        self.min_interval = min_interval
+        self._header = message.content or working()
         self._last_edit = 0.0
-        self._last_body = ""
+        self._last_body = self._header
 
-    async def set_content(
-        self,
-        body: str,
-        *,
-        force: bool = False,
-        embed: discord.Embed | None = None,
-        view: discord.ui.View | None = None,
-    ) -> None:
-        body = clip_discord(body)
-        signature = (body, embed.to_dict() if embed else None, view is not None)
-        if signature == getattr(self, "_last_signature", None) and not force:
-            return
+    async def activity(self, line: str) -> None:
+        body = clip_discord(f"{self._header}\n-# {' '.join(line.split())}")
         now = time.monotonic()
-        if (
-            not force
-            and self._last_body
-            and now - self._last_edit < self.min_interval_sec
-        ):
+        if body == self._last_body or now - self._last_edit < self.min_interval:
             return
+        await self._edit(body)
+        self._last_edit = now
+
+    async def finish(self, body: str, *, view: discord.ui.View | None = None) -> None:
+        body = clip_discord(body)
+        if not await self._edit(body, view=view):
+            # Status message gone (deleted?) — the reply still has to land.
+            kwargs = {"view": view} if view is not None else {}
+            await self.message.channel.send(body, **kwargs)
+
+    async def _edit(self, body: str, view: discord.ui.View | None = None) -> bool:
         try:
-            await self.message.edit(content=body or None, embed=embed, view=view)
-            self._last_body = body
-            self._last_signature = signature
-            self._last_edit = now
+            if view is None:
+                await self.message.edit(content=body)
+            else:
+                await self.message.edit(content=body, view=view)
         except discord.HTTPException:
-            pass
+            return False
+        self._last_body = body
+        return True

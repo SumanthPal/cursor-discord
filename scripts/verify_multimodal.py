@@ -109,33 +109,19 @@ def verify_prompt_images() -> None:
 
 
 def verify_strip_mention() -> None:
-    from bot.commands import _strip_mention
+    from bot.cursor_parse import strip_bot_mention
 
-    class BotUser:
-        id = 4242
-
-    assert _strip_mention("<@4242> fix this", BotUser()) == "fix this"  # type: ignore[arg-type]
-    assert _strip_mention("<@!4242>", BotUser()) == ""  # type: ignore[arg-type]
+    assert strip_bot_mention("<@4242> fix this", 4242) == "fix this"
+    assert strip_bot_mention("<@!4242>", 4242) == ""
     print("PASS mention stripped from thread follow-up text")
 
 
 def verify_mention_only_with_attachments() -> None:
-    from bot.commands import _is_bot_mention_only
+    from bot.cursor_parse import Intent, classify
 
-    class BotUser:
-        id = 999
-
-    class Msg:
-        def __init__(self, content: str, attachments: list[object]) -> None:
-            self.content = content
-            self.attachments = attachments
-
-    bot = BotUser()
-    assert _is_bot_mention_only(Msg("<@999>", []), bot)  # type: ignore[arg-type]
-    assert not _is_bot_mention_only(
-        Msg("<@999>", [object()]), bot
-    )  # type: ignore[arg-type]
-    assert not _is_bot_mention_only(Msg("", [object()]), bot)  # type: ignore[arg-type]
+    assert classify("", has_files=False).intent == Intent.HELLO
+    assert classify("", has_files=True).intent == Intent.TASK
+    assert classify("acme/web", has_files=True).intent == Intent.TASK
     print("PASS image-only / mention+image not treated as mention-only")
 
 

@@ -1,28 +1,34 @@
 # cursor-discord (Cursor)
 
-Discord → [Cursor cloud agents](https://cursor.com/docs/cloud-agent/api/endpoints).
+Talk to [Cursor cloud agents](https://cursor.com/docs/cloud-agent/api/endpoints) in Discord, like you'd talk to a teammate. There are no slash commands to learn.
 
-**Use:** `@Cursor` with Slack-style options (`repo=`, `branch=`, `model=`, `autopr=false`) · thread per run · busy follow-ups **steer** the live run (Cloud API `delivery: "steer"`) · `@Cursor agent …` for a new agent · `@Cursor settings` / `list my agents` / `help` · agent threads allow follow-ups without `@` · `/ask`, `/cancel`, `/status`, `/artifacts` · PR links + demo artifacts when a run finishes.
+## Using it
 
-If several repos are allowed, I ask in chat — reply with `owner/repo` or a GitHub URL (no dropdown).
+- **Ask for something:** `@Cursor fix the flaky login test`. Attach screenshots if they help. I open a thread on your message, show what I'm doing in a single line, then reply with the result and a **View PR** button. Screenshots and videos the agent makes are posted to the thread.
+- **Keep going:** reply in the thread, no `@` needed. If I'm still working, your message redirects the current run (👀 means I saw it). Say *stop* to cancel.
+- **Pick a repo:** if the channel has one repo, I use it. If it has several, name one (`@Cursor in acme/web, add dark mode`) or I'll ask which one you mean, and you just answer.
+- **Not sure?** `@Cursor` on its own, or `@Cursor what can you do?`
 
 ## Access
 
-- **Admins** = `SUPERUSER_IDS` (env). They run `/setup repos:owner/a,owner/b` to bind a channel (written to the **channel topic** as `cursor-repo:…`, survives deploys). Admins can also pass `/ask repo:`, or type `@Cursor owner/repo …` in an unbound channel (first use pins it).
-- **Members** get access via `/grant @member` (**Cursor Access** role via `CURSOR_ROLE_NAME`). `/revoke` removes it. Members only work in set-up channels, on that channel's repos: one repo launches directly; several → bot asks, you reply with `owner/repo`.
-- Everyone else is denied. If neither `SUPERUSER_IDS` nor `ALLOWED_USER_IDS` is set, everyone is treated as an admin (legacy open mode).
+- **Admins** are the users in `SUPERUSER_IDS`. They set things up by talking to the bot:
+  - `@Cursor use owner/repo here` adds a repo to the channel. Name several to add them all. `@Cursor stop using owner/repo here` removes one. The list is saved in the channel **topic** as `cursor-repo:…`, so it survives deploys. An admin can also just ask for a task naming `owner/repo` in a channel with no repos yet, and that repo becomes the channel's default.
+  - `@Cursor give @alice access` / `@Cursor remove @alice's access`.
+- **Members** with access can use the bot in channels that have repos, on those repos only. "Access" is just the **Cursor Access** role (`CURSOR_ROLE_NAME`), so admins can also hand it out from Discord's own role menu.
+- Everyone else is ignored in threads and told they need access when they `@Cursor`. If neither `SUPERUSER_IDS` nor `ALLOWED_USER_IDS` is set, everyone counts as an admin (open mode).
 
-Bot permissions: **Manage Channels** on the work channels (to write topics; the invite bit isn't enough if a channel or category denies it) and **Manage Roles**, with the bot's role above **Cursor**. When it joins a server, the bot posts a setup checklist in the system channel.
+Bot permissions: **Manage Channels** on work channels (to write the topic), **Create Public Threads**, and **Manage Roles** with the bot's role above **Cursor Access**. When it joins a server, the bot posts a short setup note in the system channel.
+
+The default model is `composer-2.5`. Set `CURSOR_MODEL` to override it (e.g. `grok-4.7`). Model ids for your key come from the Cursor SDK's `list_models`.
 
 ## Local
 
 ```bash
 cp .env.example .env   # DISCORD_* + CURSOR_API_KEY
-python -m venv .venv && .venv/bin/pip install -e .
-python -m bot
+just install
+just run               # or: just up (docker compose)
+just check             # offline checks CI runs
 ```
-
-Or `docker compose up --build`.
 
 ## Cloud Run
 
@@ -34,7 +40,7 @@ Push to `main` (or `workflow_dispatch`) runs [.github/workflows/deploy-cloudrun.
 2. JSON key → GitHub secret **`GCP_SA_KEY`**
 3. **`GCP_PROJECT`** repo variable/secret
 4. App secrets: **`DISCORD_TOKEN`**, **`DISCORD_CLIENT_ID`**, **`CURSOR_API_KEY`**
-5. Invite the bot with message + slash + Manage Channels + Manage Roles
+5. Invite the bot with Send Messages, Create Public Threads, Manage Channels, and Manage Roles
 6. **`SUPERUSER_IDS`** secret (your Discord user ID, comma-separated for several admins)
 
-Optional: `CURSOR_ROLE_NAME`, `ALLOWED_USER_IDS` / `ALLOWED_GUILD_IDS`, YAML nicknames via `PROJECTS_JSON` (see `projects.example.yaml`).
+Optional: `CURSOR_ROLE_NAME`, `CURSOR_MODEL`, `ALLOWED_USER_IDS` / `ALLOWED_GUILD_IDS`.

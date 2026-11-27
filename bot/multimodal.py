@@ -43,7 +43,7 @@ class AgentPrompt:
 
     @property
     def display(self) -> str:
-        """Human-readable prompt for Discord embeds and thread titles."""
+        """Human-readable prompt for thread titles."""
         base = self.text or self.feedback
         if self.images:
             n = len(self.images)
@@ -83,16 +83,6 @@ def merge_agent_prompts(prompts: list[AgentPrompt]) -> AgentPrompt:
         images=tuple(images),
         actionable=bool(text or images),
         feedback="\n".join(feedback_parts),
-    )
-
-
-def coalesce_ack(*, merged_count: int) -> str:
-    """Fallback when steer is unavailable and we must wait for the turn to end."""
-    if merged_count <= 1:
-        return "Still working — I'll handle this after the current turn."
-    return (
-        f"Still working — I'll combine your last **{merged_count}** messages "
-        "after the current turn."
     )
 
 
