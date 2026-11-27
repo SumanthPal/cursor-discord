@@ -5,8 +5,7 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-# Its default variant is the Fast one (500k context, high effort).
-DEFAULT_MODEL = "grok-4.7"
+DEFAULT_MODEL = "composer-2.5"
 
 
 def _csv_ids(raw: str | None) -> frozenset[int]:

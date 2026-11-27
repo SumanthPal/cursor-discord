@@ -19,7 +19,7 @@ Talk to [Cursor cloud agents](https://cursor.com/docs/cloud-agent/api/endpoints)
 
 Bot permissions: **Manage Channels** on work channels (to write the topic), **Create Public Threads**, and **Manage Roles** with the bot's role above **Cursor Access**. When it joins a server, the bot posts a short setup note in the system channel.
 
-The default model is `grok-4.7`, whose default variant is the Fast one. Set `CURSOR_MODEL` to override it.
+The default model is `composer-2.5`. Set `CURSOR_MODEL` to override it (e.g. `grok-4.7`). Model ids for your key come from the Cursor SDK's `list_models`.
 
 ## Local
 

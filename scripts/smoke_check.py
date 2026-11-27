@@ -66,7 +66,7 @@ def test_imports() -> None:
     import bot.commands  # noqa: F401
     import bot.main  # noqa: F401
 
-    assert DEFAULT_MODEL == "grok-4.7"
+    assert DEFAULT_MODEL == "composer-2.5"
     print("ok imports")
 
 
