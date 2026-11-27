@@ -371,7 +371,7 @@ async def _stop_during_startup() -> None:
     async def no_activity(_line: str) -> None:
         pass
 
-    task = asyncio.create_task(svc._send(Agent(), "go", no_activity))  # type: ignore[arg-type]
+    task = asyncio.create_task(svc._send(Agent(), "go", no_activity, first_turn=True))  # type: ignore[arg-type]
     await asyncio.sleep(0)
     assert await svc.cancel("bc-x")  # before send() returned
     gate.set()
@@ -379,6 +379,19 @@ async def _stop_during_startup() -> None:
     assert run.cancelled and result.status == "cancelled"
     # Empty final result falls back to what the agent streamed.
     assert result.text == "Streamed answer"
+
+    from cursor_sdk import CursorAgentError
+
+    class RefusedAgent(Agent):
+        async def send(self, _prompt):
+            raise CursorAgentError("invalid_argument: [usage_limit_exceeded] Your prepaid balance is used up.")
+
+    # Refused first run: the agent was never kept, so no id to follow up on.
+    first = await svc._send(RefusedAgent(), "go", no_activity, first_turn=True)  # type: ignore[arg-type]
+    assert first.agent_id == "" and first.error == "Your prepaid balance is used up."
+    # Refused follow-up: the conversation's agent still exists; keep its id.
+    later = await svc._send(RefusedAgent(), "more", no_activity, first_turn=False)  # type: ignore[arg-type]
+    assert later.agent_id == "bc-x" and later.status == "error"
 
 
 def test_stop_during_startup() -> None:
@@ -431,8 +444,23 @@ async def _failed_launch_then_retry() -> None:
     assert again.content.startswith("Hello!")
 
 
+async def _recovered_thread_agent_gone() -> None:
+    from bot.commands import AgentCog, ThreadState
+
+    cursor = FlakyCursor()
+    cog = AgentCog(SimpleNamespace(cursor=cursor))  # type: ignore[arg-type]
+    thread = FakeThread()
+    # Recovered after a redeploy: agent id from the thread, repo unknown.
+    state = cog.threads[thread.id] = ThreadState(agent_id="bc-old")
+    status = await thread.send(chat_ui.working())
+    await cog._converse(thread, state, AgentPrompt.from_text("hi"), status=status)  # type: ignore[arg-type]
+    assert cursor.calls == ["follow_up:bc-old"]  # no blind relaunch without a repo
+    assert "no longer exists" in status.content and "Mention me" in status.content
+
+
 def test_failed_launch_retry() -> None:
     asyncio.run(_failed_launch_then_retry())
+    asyncio.run(_recovered_thread_agent_gone())
     print("ok failed_launch_retry")
 
 

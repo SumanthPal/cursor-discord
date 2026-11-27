@@ -530,9 +530,20 @@ class AgentCog(commands.Cog):
                         state.agent_id, prompt.sdk_message(), on_activity=status.activity
                     )
                 except Exception as exc:
-                    if not (is_not_found_error(exc) and state.repo):
+                    if not is_not_found_error(exc):
                         raise
-                    state.agent_id = None  # agent is gone on Cursor's side: start fresh
+                    # The agent is gone on Cursor's side. Start fresh in the thread's repo;
+                    # threads recovered after a redeploy fall back to the channel's only repo.
+                    state.agent_id = None
+                    if state.repo is None:
+                        bound = await channel_repos(self.bot, thread)
+                        state.repo = bound[0] if len(bound) == 1 else None
+                    if state.repo is None:
+                        await status.finish(
+                            "That agent no longer exists on Cursor's side. Mention me here "
+                            "with what you need (and which repo) and I'll start a new one."
+                        )
+                        return
                     result = await launch()
         except Exception as exc:  # noqa: BLE001
             # A run we didn't start (e.g. before a redeploy) is still going: steer it.
@@ -540,8 +551,6 @@ class AgentCog(commands.Cog):
                 if await self._try_steer(state.agent_id, prompt):
                     await status.finish("I'm still working on the last thing. I'll fold this in.")
                     return
-            if is_not_found_error(exc):
-                state.agent_id = None
             logger.exception("agent turn failed")
             await status.finish(chat_ui.failed(exc))
             return

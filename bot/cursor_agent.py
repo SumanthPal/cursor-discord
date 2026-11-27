@@ -101,13 +101,13 @@ class CursorAgentService:
             ),
         )
         await on_started(agent.agent_id)
-        return await self._send(agent, prompt, on_activity)
+        return await self._send(agent, prompt, on_activity, first_turn=True)
 
     async def follow_up(
         self, agent_id: str, prompt: AgentMessage, *, on_activity: OnActivity
     ) -> TurnResult:
         agent = await self._resume(agent_id)
-        return await self._send(agent, prompt, on_activity)
+        return await self._send(agent, prompt, on_activity, first_turn=False)
 
     def is_running(self, agent_id: str) -> bool:
         return agent_id in self._runs
@@ -175,7 +175,12 @@ class CursorAgentService:
         )
 
     async def _send(
-        self, agent: AsyncAgent, prompt: AgentMessage, on_activity: OnActivity
+        self,
+        agent: AsyncAgent,
+        prompt: AgentMessage,
+        on_activity: OnActivity,
+        *,
+        first_turn: bool,
     ) -> TurnResult:
         agent_id = agent.agent_id
         self._starting.add(agent_id)
@@ -198,11 +203,12 @@ class CursorAgentService:
             if is_busy_error(err):
                 raise
             logger.warning("run failed for %s: %s", agent_id, err)
-            # No run means Cursor never kept the agent (e.g. out of usage): don't hand
-            # out an id that will 404 on the next follow-up.
-            started = agent_id in self._runs
+            # A brand-new agent whose first run was refused (e.g. out of usage) isn't
+            # kept by Cursor: don't hand out an id that will 404 on the next reply.
+            # An existing agent stays; only this one message failed.
+            never_kept = first_turn and agent_id not in self._runs
             return TurnResult(
-                agent_id=agent_id if started else "", status="error", error=friendly_error(err)
+                agent_id="" if never_kept else agent_id, status="error", error=friendly_error(err)
             )
         finally:
             self._starting.discard(agent_id)
